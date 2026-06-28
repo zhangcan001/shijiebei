@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+desktop-app/node_modules/
+
+# Frontend build output
+dist/
+desktop-app/dist/
+
+# Rust/Tauri build output
+target/
+desktop-app/src-tauri/target/
+
+# Local caches and generated bundles
+*.sqlite
+*.db
+*.exe
+*.msi
+*.log
+
+# Local scratch/output folders
+outputs/
+work/
+
+# Temporary fetched/debug data
+desktop-app/sporttery-*.json
+desktop-app/sporttery-*.txt
+desktop-app/sporttery-*.html
+desktop-app/sporttery-*.js
+desktop-app/zgzcw-results.html
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
