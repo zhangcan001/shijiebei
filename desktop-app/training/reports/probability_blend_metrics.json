@@ -1,0 +1,170 @@
+{
+  "sample_count": 47392,
+  "valid_count": 9479,
+  "selected": {
+    "model_weight": 0.05,
+    "market_weight": 0.95,
+    "accuracy": 0.5075429897668531,
+    "log_loss": 0.9991012640602721,
+    "brier_score": 0.1989969519481723
+  },
+  "model_only": {
+    "accuracy": 0.49868129549530543,
+    "log_loss": 1.0069353337614515,
+    "brier_score": 0.20076286159102535
+  },
+  "market_only": {
+    "accuracy": 0.5073319970461019,
+    "log_loss": 0.9991389884503595,
+    "brier_score": 0.1990021810838524
+  },
+  "grid": [
+    {
+      "model_weight": 0.0,
+      "market_weight": 1.0,
+      "accuracy": 0.5073319970461019,
+      "log_loss": 0.9991389884503595,
+      "brier_score": 0.1990021810838524
+    },
+    {
+      "model_weight": 0.05,
+      "market_weight": 0.95,
+      "accuracy": 0.5075429897668531,
+      "log_loss": 0.9991012640602721,
+      "brier_score": 0.1989969519481723
+    },
+    {
+      "model_weight": 0.1,
+      "market_weight": 0.9,
+      "accuracy": 0.5077539824876042,
+      "log_loss": 0.9991094049341367,
+      "brier_score": 0.19900153998733894
+    },
+    {
+      "model_weight": 0.15,
+      "market_weight": 0.85,
+      "accuracy": 0.5078594788479798,
+      "log_loss": 0.9991631216507613,
+      "brier_score": 0.1990159452013503
+    },
+    {
+      "model_weight": 0.2,
+      "market_weight": 0.8,
+      "accuracy": 0.5080704715687309,
+      "log_loss": 0.9992621629457296,
+      "brier_score": 0.19904016759020812
+    },
+    {
+      "model_weight": 0.25,
+      "market_weight": 0.75,
+      "accuracy": 0.5082814642894821,
+      "log_loss": 0.9994063138916195,
+      "brier_score": 0.1990742071539133
+    },
+    {
+      "model_weight": 0.3,
+      "market_weight": 0.7,
+      "accuracy": 0.5083869606498576,
+      "log_loss": 0.9995953944024979,
+      "brier_score": 0.19911806389246556
+    },
+    {
+      "model_weight": 0.35,
+      "market_weight": 0.65,
+      "accuracy": 0.5078594788479798,
+      "log_loss": 0.9998292580107294,
+      "brier_score": 0.19917173780586123
+    },
+    {
+      "model_weight": 0.4,
+      "market_weight": 0.6,
+      "accuracy": 0.5084924570102332,
+      "log_loss": 1.000107790876716,
+      "brier_score": 0.19923522889410514
+    },
+    {
+      "model_weight": 0.45,
+      "market_weight": 0.55,
+      "accuracy": 0.5090199388121109,
+      "log_loss": 1.000430911001499,
+      "brier_score": 0.19930853715719463
+    },
+    {
+      "model_weight": 0.5,
+      "market_weight": 0.5,
+      "accuracy": 0.5093364278932376,
+      "log_loss": 1.000798567619205,
+      "brier_score": 0.1993916625951308
+    },
+    {
+      "model_weight": 0.55,
+      "market_weight": 0.45,
+      "accuracy": 0.5083869606498576,
+      "log_loss": 1.0012107407517452,
+      "brier_score": 0.19948460520791245
+    },
+    {
+      "model_weight": 0.6,
+      "market_weight": 0.4,
+      "accuracy": 0.5087034497309842,
+      "log_loss": 1.0016674409124635,
+      "brier_score": 0.19958736499554025
+    },
+    {
+      "model_weight": 0.65,
+      "market_weight": 0.35,
+      "accuracy": 0.5088089460913598,
+      "log_loss": 1.0021687089488667,
+      "brier_score": 0.19969994195801427
+    },
+    {
+      "model_weight": 0.7,
+      "market_weight": 0.3,
+      "accuracy": 0.5071210043253508,
+      "log_loss": 1.0027146160174008,
+      "brier_score": 0.19982233609533456
+    },
+    {
+      "model_weight": 0.75,
+      "market_weight": 0.25,
+      "accuracy": 0.5072265006857264,
+      "log_loss": 1.0033052636856399,
+      "brier_score": 0.1999545474075006
+    },
+    {
+      "model_weight": 0.8,
+      "market_weight": 0.2,
+      "accuracy": 0.5060660407215951,
+      "log_loss": 1.0039407841593464,
+      "brier_score": 0.20009657589451293
+    },
+    {
+      "model_weight": 0.85,
+      "market_weight": 0.15,
+      "accuracy": 0.5037451207933327,
+      "log_loss": 1.00462134063372,
+      "brier_score": 0.20024842155637274
+    },
+    {
+      "model_weight": 0.9,
+      "market_weight": 0.1,
+      "accuracy": 0.5035341280725815,
+      "log_loss": 1.0053471277699104,
+      "brier_score": 0.20041008439307628
+    },
+    {
+      "model_weight": 0.95,
+      "market_weight": 0.05,
+      "accuracy": 0.5027956535499525,
+      "log_loss": 1.0061183722995164,
+      "brier_score": 0.2005815644046276
+    },
+    {
+      "model_weight": 1.0,
+      "market_weight": 0.0,
+      "accuracy": 0.49868129549530543,
+      "log_loss": 1.0069353337614515,
+      "brier_score": 0.20076286159102535
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "ready": true,
+  "metrics": {
+    "sample_count": 384,
+    "train_count": 307,
+    "valid_count": 77,
+    "accuracy": 0.7012987012987013,
+    "log_loss": 0.6448988862367973,
+    "brier_score": 0.22182893035392373,
+    "hit_rate": 0.3333333333333333
+  },
+  "created_at": "2026-06-29T01:52:15Z"
+}

@@ -1,0 +1,168 @@
+{
+  "model_version": "calibrator_v1",
+  "method": "per_class_bucket_calibration",
+  "classes": [
+    "A",
+    "D",
+    "H"
+  ],
+  "bins": {
+    "A": [
+      {
+        "low": 0.0,
+        "high": 0.25,
+        "count": 3281,
+        "avg_pred": 0.18121399910189429,
+        "empirical_prob": 0.15879305089911613
+      },
+      {
+        "low": 0.25,
+        "high": 0.35,
+        "count": 2837,
+        "avg_pred": 0.2980680362763507,
+        "empirical_prob": 0.2809305604511808
+      },
+      {
+        "low": 0.35,
+        "high": 0.45,
+        "count": 1624,
+        "avg_pred": 0.3966451192177315,
+        "empirical_prob": 0.3866995073891626
+      },
+      {
+        "low": 0.45,
+        "high": 0.55,
+        "count": 921,
+        "avg_pred": 0.493669233302662,
+        "empirical_prob": 0.4788273615635179
+      },
+      {
+        "low": 0.55,
+        "high": 0.65,
+        "count": 506,
+        "avg_pred": 0.5959361997397686,
+        "empirical_prob": 0.5691699604743083
+      },
+      {
+        "low": 0.65,
+        "high": 0.8,
+        "count": 293,
+        "avg_pred": 0.7095901787698059,
+        "empirical_prob": 0.7064846416382252
+      },
+      {
+        "low": 0.8,
+        "high": 1.0,
+        "count": 17,
+        "avg_pred": 0.8258096230692568,
+        "empirical_prob": 0.7647058823529411
+      }
+    ],
+    "D": [
+      {
+        "low": 0.0,
+        "high": 0.25,
+        "count": 934,
+        "avg_pred": 0.20256851496667472,
+        "empirical_prob": 0.1702355460385439
+      },
+      {
+        "low": 0.25,
+        "high": 0.35,
+        "count": 4517,
+        "avg_pred": 0.31423454706830584,
+        "empirical_prob": 0.24263891963692716
+      },
+      {
+        "low": 0.35,
+        "high": 0.45,
+        "count": 3993,
+        "avg_pred": 0.37815049693969066,
+        "empirical_prob": 0.3037816178312046
+      },
+      {
+        "low": 0.45,
+        "high": 0.55,
+        "count": 35,
+        "avg_pred": 0.46164259387300705,
+        "empirical_prob": 0.3142857142857143
+      },
+      {
+        "low": 0.55,
+        "high": 0.65,
+        "count": 0,
+        "avg_pred": 0.6000000000000001,
+        "empirical_prob": 0.6000000000000001
+      },
+      {
+        "low": 0.65,
+        "high": 0.8,
+        "count": 0,
+        "avg_pred": 0.7250000000000001,
+        "empirical_prob": 0.7250000000000001
+      },
+      {
+        "low": 0.8,
+        "high": 1.0,
+        "count": 0,
+        "avg_pred": 0.9,
+        "empirical_prob": 0.9
+      }
+    ],
+    "H": [
+      {
+        "low": 0.0,
+        "high": 0.25,
+        "count": 2626,
+        "avg_pred": 0.17863974223121903,
+        "empirical_prob": 0.23000761614623
+      },
+      {
+        "low": 0.25,
+        "high": 0.35,
+        "count": 2761,
+        "avg_pred": 0.29858578306186073,
+        "empirical_prob": 0.3980441868888084
+      },
+      {
+        "low": 0.35,
+        "high": 0.45,
+        "count": 1964,
+        "avg_pred": 0.3976856108132329,
+        "empirical_prob": 0.4893075356415479
+      },
+      {
+        "low": 0.45,
+        "high": 0.55,
+        "count": 1159,
+        "avg_pred": 0.49301365699403205,
+        "empirical_prob": 0.6125970664365833
+      },
+      {
+        "low": 0.55,
+        "high": 0.65,
+        "count": 543,
+        "avg_pred": 0.5938245064136508,
+        "empirical_prob": 0.7108655616942909
+      },
+      {
+        "low": 0.65,
+        "high": 0.8,
+        "count": 354,
+        "avg_pred": 0.7138507820561582,
+        "empirical_prob": 0.807909604519774
+      },
+      {
+        "low": 0.8,
+        "high": 1.0,
+        "count": 72,
+        "avg_pred": 0.8428469486164105,
+        "empirical_prob": 0.8194444444444444
+      }
+    ]
+  },
+  "created_at": "2026-06-29T00:26:20Z",
+  "metrics": {
+    "sample_count": 9479
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "home": {
+    "sample_count": 47392,
+    "train_count": 37913,
+    "valid_count": 9479,
+    "mae": 0.9223412635630068,
+    "mean_poisson_deviance": 1.068743450861676
+  },
+  "away": {
+    "sample_count": 47392,
+    "train_count": 37913,
+    "valid_count": 9479,
+    "mae": 0.8215269486798781,
+    "mean_poisson_deviance": 1.0749514578940977
+  }
+}

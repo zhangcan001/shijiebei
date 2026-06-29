@@ -1,0 +1,29 @@
+{
+  "sample_count": 47392,
+  "train_count": 37913,
+  "valid_count": 9479,
+  "accuracy": 0.4978373246123009,
+  "log_loss": 1.0065740345852485,
+  "brier_score": 0.20080255472722955,
+  "date_range": {
+    "start": "2019-07-26",
+    "end": "2026-05-31"
+  },
+  "member_metrics": {
+    "logistic": {
+      "accuracy": 0.4764215634560608,
+      "log_loss": 1.0184314010421742,
+      "brier_score": 0.20351556207582333
+    },
+    "hist_gbdt": {
+      "accuracy": 0.5074374934064775,
+      "log_loss": 1.000566216985546,
+      "brier_score": 0.1993293332416091
+    },
+    "extra_trees": {
+      "accuracy": 0.478320497942821,
+      "log_loss": 1.0176608527844555,
+      "brier_score": 0.20325126540377614
+    }
+  }
+}

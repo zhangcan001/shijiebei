@@ -27,6 +27,11 @@ desktop-app/sporttery-*.txt
 desktop-app/sporttery-*.html
 desktop-app/sporttery-*.js
 desktop-app/zgzcw-results.html
+desktop-app/training/.venv/
+desktop-app/training/datasets/raw/
+desktop-app/training/datasets/processed/
+__pycache__/
+*.pyc
 
 # OS/editor noise
 .DS_Store

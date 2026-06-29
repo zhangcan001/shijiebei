@@ -1,0 +1,274 @@
+{
+  "model_version": "worldcup_live_correction_v1",
+  "model_type": "binary_logistic_live_bet_hit_correction",
+  "purpose": "只修正世界杯/淘汰赛临场推荐置信度，不替代胜平负概率模型。",
+  "feature_names": [
+    "model_prob",
+    "sporttery_prob",
+    "europe_prob_filled",
+    "europe_missing",
+    "current_odds",
+    "fair_odds",
+    "ev",
+    "advantage_rate",
+    "stake_pct",
+    "data_quality_score",
+    "is_score_or_total_goals",
+    "has_anomaly",
+    "is_formal_recommendation"
+  ],
+  "coefficients": [
+    0.34230773020517086,
+    0.25141567686143396,
+    0.34230773020517086,
+    0.0,
+    -0.2742820161947071,
+    0.3721284226168028,
+    -0.036643247398105275,
+    -0.036643247398099696,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "intercept": -0.07576616043642731,
+  "scaler_mean": {
+    "model_prob": 0.33264940285792227,
+    "sporttery_prob": 0.3326877365965314,
+    "europe_prob_filled": 0.33264940285792227,
+    "europe_missing": 0.0,
+    "current_odds": 4.185244299674267,
+    "fair_odds": 4.354279236996867,
+    "ev": -0.03716693529530178,
+    "advantage_rate": -0.03716693529530178,
+    "stake_pct": 0.0,
+    "data_quality_score": 88.0,
+    "is_score_or_total_goals": 0.0,
+    "has_anomaly": 1.0,
+    "is_formal_recommendation": 0.0
+  },
+  "scaler_scale": {
+    "model_prob": 0.18608587091345583,
+    "sporttery_prob": 0.18631362946180968,
+    "europe_prob_filled": 0.18608587091345583,
+    "europe_missing": 1.0,
+    "current_odds": 3.262865817686419,
+    "fair_odds": 3.436140812993812,
+    "ev": 0.021708351136293807,
+    "advantage_rate": 0.021708351136293814,
+    "stake_pct": 1.0,
+    "data_quality_score": 1.0,
+    "is_score_or_total_goals": 1.0,
+    "has_anomaly": 1.0,
+    "is_formal_recommendation": 1.0
+  },
+  "metrics": {
+    "sample_count": 384,
+    "train_count": 307,
+    "valid_count": 77,
+    "accuracy": 0.7012987012987013,
+    "log_loss": 0.6448988862367973,
+    "brier_score": 0.22182893035392373,
+    "hit_rate": 0.3333333333333333
+  },
+  "created_at": "2026-06-29T01:52:15Z",
+  "source_file": "C:\\Users\\ADMIN\\Documents\\Codex\\2026-06-23\\nen\\desktop-app\\training\\datasets\\processed\\worldcup_closure_samples.csv",
+  "base_model_manifest": {
+    "active_model_version": "outcome_ensemble_model_v1+probability_blend_v1",
+    "outcome_model_path": "outcome_model_v1.json",
+    "outcome_ensemble_model_path": "outcome_ensemble_model_v1.json",
+    "calibrator_path": "calibrator_v1.json",
+    "probability_blend_path": "probability_blend_v1.json",
+    "feature_schema_path": "feature_schema_v1.json",
+    "strategy_rules_path": "strategy_rules_v1.json",
+    "goals_home_model_path": "goals_home_model_v1.json",
+    "goals_away_model_path": "goals_away_model_v1.json",
+    "handicap_model_path": "handicap_mapping_model_v1.json",
+    "created_at": "2026-06-29T01:52:14Z",
+    "training_data_range": {
+      "start": "2019-07-26",
+      "end": "2026-05-31",
+      "train_count": 37913,
+      "valid_count": 9479
+    },
+    "metrics_summary": {
+      "sample_count": 47392,
+      "train_count": 37913,
+      "valid_count": 9479,
+      "accuracy": 0.5075429897668531,
+      "log_loss": 0.9991012640602721,
+      "brier_score": 0.1989969519481723,
+      "date_range": {
+        "start": "2019-07-26",
+        "end": "2026-05-31"
+      },
+      "member_metrics": {
+        "logistic": {
+          "accuracy": 0.4764215634560608,
+          "log_loss": 1.0184314010421742,
+          "brier_score": 0.20351556207582333
+        },
+        "hist_gbdt": {
+          "accuracy": 0.5074374934064775,
+          "log_loss": 1.000566216985546,
+          "brier_score": 0.1993293332416091
+        },
+        "extra_trees": {
+          "accuracy": 0.478320497942821,
+          "log_loss": 1.0176608527844555,
+          "brier_score": 0.20325126540377614
+        }
+      },
+      "probability_blend": {
+        "model_weight": 0.05,
+        "market_weight": 0.95,
+        "accuracy": 0.5075429897668531,
+        "log_loss": 0.9991012640602721,
+        "brier_score": 0.1989969519481723
+      }
+    },
+    "backtest_summary": {
+      "bet_count": 0,
+      "hit_count": 0,
+      "hit_rate": 0.0,
+      "total_stake": 0.0,
+      "total_profit": 0.0,
+      "roi": 0.0,
+      "max_drawdown": 0.0
+    },
+    "model_objectives": {
+      "primary": [
+        "log_loss",
+        "brier_score",
+        "calibration_quality"
+      ],
+      "betting": [
+        "roi",
+        "max_drawdown",
+        "ev_realization"
+      ],
+      "note": "模型状态和推荐逻辑以概率校准、ROI、回撤和风险控制为核心。"
+    },
+    "global_models": {
+      "outcome": "outcome_model_v1",
+      "outcome_ensemble": "outcome_ensemble_model_v1",
+      "calibrator": "calibrator_v1",
+      "probability_blend": "probability_blend_v1",
+      "goals_home": "goals_home_model_v1",
+      "goals_away": "goals_away_model_v1",
+      "handicap": "handicap_mapping_model_v1",
+      "worldcup_live_correction": "worldcup_live_correction_v1",
+      "goals_metrics": {
+        "home": {
+          "sample_count": 47392,
+          "train_count": 37913,
+          "valid_count": 9479,
+          "mae": 0.9223412635630068,
+          "mean_poisson_deviance": 1.068743450861676
+        },
+        "away": {
+          "sample_count": 47392,
+          "train_count": 37913,
+          "valid_count": 9479,
+          "mae": 0.8215269486798781,
+          "mean_poisson_deviance": 1.0749514578940977
+        }
+      },
+      "handicap_metrics": {
+        "sample_count": 189568,
+        "train_count": 151654,
+        "valid_count": 37914,
+        "accuracy": 0.6959698264493327,
+        "log_loss": 0.7655290298993918
+      },
+      "worldcup_live_correction_status": {
+        "ready": true,
+        "report": {
+          "ready": true,
+          "metrics": {
+            "sample_count": 384,
+            "train_count": 307,
+            "valid_count": 77,
+            "accuracy": 0.7012987012987013,
+            "log_loss": 0.6448988862367973,
+            "brier_score": 0.22182893035392373,
+            "hit_rate": 0.3333333333333333
+          },
+          "created_at": "2026-06-29T01:11:52Z"
+        }
+      }
+    },
+    "worldcup_model_v2_layers": [
+      {
+        "layer": "1_market_baseline",
+        "status": "implemented",
+        "purpose": "用欧赔/平均赔率/最大赔率隐含概率作为市场基准，并计算水分、离散度和盘口强弱。",
+        "artifacts": [
+          "feature_schema_v1.json",
+          "probability_blend_v1.json"
+        ]
+      },
+      {
+        "layer": "2_team_strength",
+        "status": "implemented_with_proxy",
+        "purpose": "用近期状态、攻防强度、Elo 代理、排名/阵容强度代理生成赛前强弱特征。",
+        "artifacts": [
+          "features.csv",
+          "outcome_ensemble_model_v1.json"
+        ],
+        "limitation": "Football-Data 联赛 CSV 缺少稳定的国家队实时 Elo、FIFA 排名和国家队阵容身价，当前以可获得特征和运行时数据做代理。"
+      },
+      {
+        "layer": "3_lineup_injury_adjustment",
+        "status": "runtime_framework",
+        "purpose": "首发、伤停、xG 缺失时影响推荐等级和比分/总进球风险，不直接伪造训练标签。",
+        "artifacts": [
+          "source_health",
+          "recommendation_service",
+          "strategy_rules_v1.json"
+        ],
+        "limitation": "历史 CSV 不含赛前确认首发和伤停，训练阶段不把首发次数当确认首发。"
+      },
+      {
+        "layer": "4_stage_knockout_context",
+        "status": "implemented_with_defaults",
+        "purpose": "加入杯赛/淘汰赛/中立场/赛程重要性字段，让后端预测能按淘汰赛语境组装特征。",
+        "artifacts": [
+          "feature_schema_v1.json",
+          "model_service.rs"
+        ],
+        "limitation": "联赛历史样本中的淘汰赛字段较少，真实世界杯淘汰赛需要赛后持续复盘校准。"
+      },
+      {
+        "layer": "5_goals_score_model",
+        "status": "implemented",
+        "purpose": "单独训练主客进球 Poisson 模型，输出比分矩阵和总进球概率，不再只从胜平负硬推比分。",
+        "artifacts": [
+          "goals_home_model_v1.json",
+          "goals_away_model_v1.json"
+        ]
+      },
+      {
+        "layer": "6_dynamic_probability_fusion",
+        "status": "implemented",
+        "purpose": "按市场热门程度动态融合模型概率和市场概率，降低模型在强热门/弱热门区间的过拟合。",
+        "artifacts": [
+          "probability_blend_v1.json"
+        ]
+      },
+      {
+        "layer": "7_recommendation_backtest",
+        "status": "implemented",
+        "purpose": "把概率预测和投注推荐拆开，输出盈利策略、禁买/降级规则、ROI和回撤控制。",
+        "artifacts": [
+          "strategy_rules_v1.json",
+          "backtest_summary.json"
+        ]
+      }
+    ],
+    "missing_files": [],
+    "ready": true,
+    "note": "v0.8 增加国家队/淘汰赛上下文字段、动态市场概率融合、命中率策略与盈利策略分离；优先优化概率校准、Log Loss 和市场错误识别。"
+  }
+}

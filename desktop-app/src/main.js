@@ -1,84 +1,16 @@
-import { invoke } from "@tauri-apps/api/core";
+import { api } from "./api.js";
 import { listen } from "@tauri-apps/api/event";
 import "./styles.css";
 
-const state = {
-  view: "dashboard",
-  status: null,
-  matches: [],
-  predictions: [],
-  recommendations: [],
-  analyses: [],
-  movements: [],
-  anomalies: [],
-  oddsHistory: [],
-  results: [],
-  backtest: null,
-  todayPlan: null,
-  simulation: null,
-  bankroll: null,
-  externalConfig: null,
-  modelSettings: null,
-  probeResult: null,
-  diagnostics: null,
-  simulationProgress: null,
-  selectedSimMatchId: "",
-  recFilter: "全部",
-  autoRefreshTimer: null,
-  busy: false,
-  message: "准备就绪"
-};
-
-const pct = value => `${((Number(value) || 0) * 100).toFixed(2)}%`;
-const odds = value => Number(value || 0).toFixed(2);
-const signedPct = value => `${Number(value || 0) >= 0 ? "+" : ""}${((Number(value) || 0) * 100).toFixed(2)}%`;
-const money = value => `${(Number(value || 0) * 100).toFixed(2)}%`;
-const ciText = (low, high) => `${pct(low)} - ${pct(high)}`;
-
-const teamRanks = {
-  "法国": 1, "西班牙": 2, "阿根廷": 3, "英格兰": 4, "葡萄牙": 5,
-  "巴西": 6, "荷兰": 7, "摩洛哥": 8, "比利时": 9, "德国": 10,
-  "克罗地亚": 11, "哥伦比亚": 13, "塞内加尔": 14, "墨西哥": 15,
-  "美国": 16, "乌拉圭": 17, "日本": 18, "瑞士": 19, "伊朗": 21,
-  "土耳其": 22, "厄瓜多尔": 23, "奥地利": 24, "韩国": 25,
-  "澳大利亚": 27, "阿尔及利亚": 28, "埃及": 29, "加拿大": 30,
-  "挪威": 31, "巴拿马": 33, "科特迪瓦": 34, "瑞典": 38,
-  "巴拉圭": 40, "捷克": 41, "苏格兰": 43, "突尼斯": 44,
-  "民主刚果": 46, "乌兹别克斯坦": 50, "卡塔尔": 55, "伊拉克": 57,
-  "南非": 60, "沙特": 61, "约旦": 63, "波黑": 65, "佛得角": 69,
-  "加纳": 74, "库拉索": 82, "海地": 83, "新西兰": 85
-};
-
-function cleanTeamName(name = "") {
-  return String(name).replace(/（第\d+）|\(第\d+\)/g, "").trim();
-}
-
-function teamRank(name = "") {
-  const clean = cleanTeamName(name);
-  const hit = Object.entries(teamRanks).find(([team]) => clean.includes(team) || team.includes(clean));
-  return hit?.[1] || null;
-}
-
-function rankedTeam(name = "") {
-  const clean = cleanTeamName(name);
-  const rank = teamRank(clean);
-  return rank ? `${clean}（第${rank}）` : clean || "-";
-}
-
-function rankedMatchLabel(label = "") {
-  const parts = String(label).split(/\s+vs\s+|\s+VS\s+| 对 /i);
-  if (parts.length === 2) {
-    return `${rankedTeam(parts[0])} vs ${rankedTeam(parts[1])}`;
-  }
-  return label || "-";
-}
-
+import { state } from "./state.js";
+import { pct, odds, signedPct, money, ciText, rankedTeam, rankedMatchLabel } from "./utils/format.js";
 const views = [
   ["dashboard", "比赛中心"],
   ["prediction", "预测中心"],
   ["match", "单场分析"],
   ["sim", "模拟对决"],
   ["today", "今日方案"],
+  ["snapshots", "赛前快照"],
   ["recommend", "买球推荐"],
   ["movements", "赔率异动"],
   ["results", "赛果中心"],
@@ -110,34 +42,46 @@ async function safeRun(message, fn) {
 }
 
 async function loadStatus() {
-  state.status = await invoke("app_status");
-  state.matches = await invoke("list_matches");
+  state.status = await api.invokeCommand("app_status");
+  state.providers = state.status?.providers || await api.invokeCommand("list_providers");
+  state.matches = await api.invokeCommand("list_matches");
   if (!state.selectedSimMatchId && state.matches.length) {
     state.selectedSimMatchId = state.matches[0].id;
   }
-  state.predictions = await invoke("list_predictions");
-  state.movements = await invoke("list_odds_movements");
-  state.anomalies = await invoke("list_odds_anomalies");
-  state.oddsHistory = await invoke("list_odds_history");
-  state.results = await invoke("list_results");
-  state.bankroll = await invoke("get_bankroll_settings");
-  state.externalConfig = await invoke("get_external_source_config");
-  state.modelSettings = await invoke("get_model_settings");
-  state.diagnostics = await invoke("model_diagnostics");
-  state.backtest = await invoke("backtest_report");
+  state.predictions = await api.invokeCommand("list_predictions");
+  state.movements = await api.invokeCommand("list_odds_movements");
+  state.anomalies = await api.invokeCommand("list_odds_anomalies");
+  state.oddsHistory = await api.invokeCommand("list_odds_history");
+  state.results = await api.invokeCommand("list_results");
+  state.bankroll = await api.invokeCommand("get_bankroll_settings");
+  state.externalConfig = await api.invokeCommand("get_external_source_config");
+  state.modelSettings = await api.invokeCommand("get_model_settings");
+  state.diagnostics = await api.invokeCommand("model_diagnostics");
+  state.activeModel = await api.invokeCommand("get_active_model_info");
+  state.systemStatus = await api.invokeCommand("get_system_status");
+  state.backtest = await api.invokeCommand("backtest_report");
   try {
-    state.recommendations = await invoke("list_recommendations");
-    state.analyses = await invoke("list_match_analyses");
-    state.todayPlan = await invoke("today_bet_plan");
+    state.recommendations = await api.invokeCommand("list_recommendations");
+    state.analyses = await api.invokeCommand("list_match_analyses");
+    state.todayPlan = await api.invokeCommand("today_bet_plan");
+    state.preMatchSnapshots = await api.invokeCommand("get_pre_match_snapshots");
+    state.snapshotAuditLogs = await api.invokeCommand("get_snapshot_audit_logs");
+    state.livePaperSummary = await api.invokeCommand("get_live_paper_trading_summary");
+    state.livePaperRecords = await api.invokeCommand("get_live_paper_trading_records");
+    state.systemStatus = await api.invokeCommand("get_system_status");
   } catch {
     state.recommendations = [];
     state.analyses = [];
     state.todayPlan = null;
+    state.preMatchSnapshots = [];
+    state.snapshotAuditLogs = [];
+    state.livePaperSummary = null;
+    state.livePaperRecords = [];
   }
 }
 
 async function refreshCore() {
-  await invoke("refresh_core_data", {
+  await api.invokeCommand("refresh_core_data", {
     oddsApiKey: document.querySelector("#odds-key")?.value || "",
     region: document.querySelector("#odds-region")?.value || "eu"
   });
@@ -145,41 +89,41 @@ async function refreshCore() {
 }
 
 async function refreshXg() {
-  await invoke("refresh_statsbomb_xg");
+  await api.invokeCommand("refresh_statsbomb_xg");
   await loadStatus();
 }
 
 async function refreshSportteryInjuries() {
-  state.probeResult = await invoke("refresh_sporttery_injuries");
-  state.status = await invoke("app_status");
+  state.probeResult = await api.invokeCommand("refresh_sporttery_injuries");
+  state.status = await api.invokeCommand("app_status");
 }
 
 async function refreshResults() {
-  state.results = await invoke("refresh_results");
+  state.results = await api.invokeCommand("refresh_results");
 }
 
 async function importHistoricalResults() {
   const csvText = document.querySelector("#historical-csv")?.value || "";
-  state.probeResult = await invoke("import_historical_results_csv", { csvText });
+  state.probeResult = await api.invokeCommand("import_historical_results_csv", { csvText });
   await loadStatus();
 }
 
 async function importPlayerStatus() {
   const csvText = document.querySelector("#player-status-csv")?.value || "";
-  state.probeResult = await invoke("import_player_status_csv", { csvText });
+  state.probeResult = await api.invokeCommand("import_player_status_csv", { csvText });
   await loadStatus();
 }
 
 async function importTeamStats() {
   const csvText = document.querySelector("#team-stats-csv")?.value || "";
-  state.probeResult = await invoke("import_team_stats_csv", { csvText });
+  state.probeResult = await api.invokeCommand("import_team_stats_csv", { csvText });
   await loadStatus();
 }
 
 async function autoSettle() {
-  await invoke("auto_settle_predictions");
-  state.predictions = await invoke("list_predictions");
-  state.diagnostics = await invoke("model_diagnostics");
+  await api.invokeCommand("auto_settle_predictions");
+  state.predictions = await api.invokeCommand("list_predictions");
+  state.diagnostics = await api.invokeCommand("model_diagnostics");
 }
 
 async function runSimulation() {
@@ -198,14 +142,14 @@ async function runSimulation() {
   };
   state.simulationProgress = { done: 0, total: request.simulations, percent: 0, message: "准备模拟" };
   render();
-  state.simulation = await invoke("simulate_match", { request });
+  state.simulation = await api.invokeCommand("simulate_match", { request });
   state.simulationProgress = { done: request.simulations, total: request.simulations, percent: 1, message: "模拟完成" };
 }
 
 async function saveRecommendation(index) {
   const item = state.recommendations[index];
   if (!item) return;
-  await invoke("save_prediction", {
+  await api.invokeCommand("save_prediction", {
     record: {
       match_label: item.match_label,
       market: item.market,
@@ -217,21 +161,21 @@ async function saveRecommendation(index) {
       stake_pct: item.stake_pct
     }
   });
-  state.predictions = await invoke("list_predictions");
-  state.diagnostics = await invoke("model_diagnostics");
+  state.predictions = await api.invokeCommand("list_predictions");
+  state.diagnostics = await api.invokeCommand("model_diagnostics");
 }
 
 async function deletePrediction(id) {
-  await invoke("delete_prediction", { id: Number(id) });
-  state.predictions = await invoke("list_predictions");
-  state.diagnostics = await invoke("model_diagnostics");
+  await api.invokeCommand("delete_prediction", { id: Number(id) });
+  state.predictions = await api.invokeCommand("list_predictions");
+  state.diagnostics = await api.invokeCommand("model_diagnostics");
 }
 
 async function settlePrediction(id, hit) {
-  await invoke("settle_prediction", { id: Number(id), hit });
-  state.predictions = await invoke("list_predictions");
-  state.diagnostics = await invoke("model_diagnostics");
-  state.backtest = await invoke("backtest_report");
+  await api.invokeCommand("settle_prediction", { id: Number(id), hit });
+  state.predictions = await api.invokeCommand("list_predictions");
+  state.diagnostics = await api.invokeCommand("model_diagnostics");
+  state.backtest = await api.invokeCommand("backtest_report");
 }
 
 async function saveBankroll() {
@@ -241,8 +185,8 @@ async function saveBankroll() {
     max_loss_pct: Number(document.querySelector("#max-loss")?.value || 6) / 100,
     auto_refresh_minutes: Number(document.querySelector("#auto-refresh")?.value || 0)
   };
-  await invoke("save_bankroll_settings", { settings });
-  state.bankroll = await invoke("get_bankroll_settings");
+  await api.invokeCommand("save_bankroll_settings", { settings });
+  state.bankroll = await api.invokeCommand("get_bankroll_settings");
   setupAutoRefresh();
 }
 
@@ -253,17 +197,54 @@ async function saveExternalConfig() {
     stats_url: document.querySelector("#stats-url")?.value || "",
     notes: document.querySelector("#source-notes")?.value || ""
   };
-  await invoke("save_external_source_config", { config });
-  state.externalConfig = await invoke("get_external_source_config");
+  await api.invokeCommand("save_external_source_config", { config });
+  state.externalConfig = await api.invokeCommand("get_external_source_config");
+}
+
+async function saveProviderCredential(providerId) {
+  const apiKey = document.querySelector(`#provider-key-${providerId}`)?.value || "";
+  state.probeResult = await api.invokeCommand("save_provider_credential", {
+    input: { provider_id: providerId, api_key: apiKey }
+  });
+  state.providers = await api.invokeCommand("list_providers");
+}
+
+async function clearProviderCredential(providerId) {
+  state.probeResult = await api.invokeCommand("clear_provider_credential", { providerId });
+  state.providers = await api.invokeCommand("list_providers");
+}
+
+async function testProvider(providerId) {
+  state.probeResult = await api.invokeCommand("test_provider_connection", { providerId });
+  state.providers = await api.invokeCommand("list_providers");
+  state.status = await api.invokeCommand("app_status");
+}
+
+async function toggleProvider(providerId, enabled) {
+  await api.invokeCommand("set_provider_enabled", { providerId, enabled });
+  state.providers = await api.invokeCommand("list_providers");
+}
+
+async function clearProviderCache(providerId) {
+  state.probeResult = await api.invokeCommand("clear_provider_cache", { providerId });
+  state.providers = await api.invokeCommand("list_providers");
+  state.status = await api.invokeCommand("app_status");
 }
 
 async function refreshExternalSources() {
-  state.probeResult = await invoke("refresh_external_sources");
-  state.status = await invoke("app_status");
+  state.probeResult = await api.invokeCommand("refresh_all_data_sources");
+  state.status = await api.invokeCommand("app_status");
+  state.providers = state.status?.providers || await api.invokeCommand("list_providers");
+  state.activeModel = await api.invokeCommand("get_active_model_info");
+}
+
+async function runTrainingPipeline() {
+  state.probeResult = await api.invokeCommand("run_training_pipeline");
+  state.activeModel = await api.invokeCommand("get_active_model_info");
 }
 
 async function probeExternal(url) {
-  state.probeResult = await invoke("probe_external_source", { url });
+  state.probeResult = await api.invokeCommand("probe_external_source", { url });
 }
 
 async function saveModelSettings() {
@@ -276,19 +257,115 @@ async function saveModelSettings() {
     high_odds_limit: Number(document.querySelector("#high-odds-limit")?.value || 8),
     mode: document.querySelector("#model-mode")?.value || "手动"
   };
-  await invoke("save_model_settings", { settings });
-  state.modelSettings = await invoke("get_model_settings");
-  state.recommendations = await invoke("list_recommendations");
+  await api.invokeCommand("save_model_settings", { settings });
+  state.modelSettings = await api.invokeCommand("get_model_settings");
+  state.recommendations = await api.invokeCommand("list_recommendations");
 }
 
 async function autoTuneModel() {
-  state.modelSettings = await invoke("auto_tune_model");
-  state.recommendations = await invoke("list_recommendations");
+  state.modelSettings = await api.invokeCommand("auto_tune_model");
+  state.recommendations = await api.invokeCommand("list_recommendations");
 }
 
 async function freezeRecommendations() {
-  state.probeResult = await invoke("freeze_current_recommendations");
-  state.backtest = await invoke("backtest_report");
+  state.probeResult = await api.invokeCommand("freeze_current_recommendations");
+  state.backtest = await api.invokeCommand("backtest_report");
+}
+
+async function collectWorldcupSnapshot() {
+  state.probeResult = await api.invokeCommand("collect_worldcup_pre_match_snapshot");
+  await loadStatus();
+}
+
+async function createPreMatchSnapshot(matchId) {
+  state.probeResult = await api.invokeCommand("create_pre_match_snapshot", { matchId });
+  state.preMatchSnapshots = await api.invokeCommand("get_pre_match_snapshots");
+}
+
+async function createTodayPreMatchSnapshots() {
+  state.probeResult = await api.invokeCommand("create_today_pre_match_snapshots");
+  state.preMatchSnapshots = await api.invokeCommand("get_pre_match_snapshots");
+  state.livePaperSummary = await api.invokeCommand("get_live_paper_trading_summary");
+}
+
+async function markFinalPreMatchSnapshot(snapshotId) {
+  state.probeResult = await api.invokeCommand("mark_final_pre_match_snapshot", { snapshotId: Number(snapshotId) });
+  state.preMatchSnapshots = await api.invokeCommand("get_pre_match_snapshots");
+  state.snapshotAuditLogs = await api.invokeCommand("get_snapshot_audit_logs");
+  state.livePaperSummary = await api.invokeCommand("get_live_paper_trading_summary");
+}
+
+async function settlePreMatchSnapshot(snapshotId) {
+  const score = prompt("输入赛果比分，例如 2:1");
+  if (!score) return;
+  const parts = score.split(":");
+  if (parts.length !== 2) throw new Error("比分格式应为 2:1");
+  state.probeResult = await api.invokeCommand("settle_pre_match_snapshot", {
+    snapshotId: Number(snapshotId),
+    homeScore: Number(parts[0]),
+    awayScore: Number(parts[1])
+  });
+  state.preMatchSnapshots = await api.invokeCommand("get_pre_match_snapshots");
+  state.livePaperSummary = await api.invokeCommand("get_live_paper_trading_summary");
+  state.livePaperRecords = await api.invokeCommand("get_live_paper_trading_records");
+}
+
+async function settleAllFinishedSnapshots() {
+  state.probeResult = await api.invokeCommand("settle_all_finished_snapshots");
+  state.preMatchSnapshots = await api.invokeCommand("get_pre_match_snapshots");
+  state.livePaperSummary = await api.invokeCommand("get_live_paper_trading_summary");
+  state.livePaperRecords = await api.invokeCommand("get_live_paper_trading_records");
+}
+
+async function auditPreMatchSnapshots() {
+  state.probeResult = await api.invokeCommand("audit_pre_match_snapshots");
+  state.snapshotAuditLogs = await api.invokeCommand("get_snapshot_audit_logs");
+  state.livePaperSummary = await api.invokeCommand("get_live_paper_trading_summary");
+  state.systemStatus = await api.invokeCommand("get_system_status");
+}
+
+async function exportAppData() {
+  state.probeResult = await api.invokeCommand("export_app_data");
+  state.systemStatus = await api.invokeCommand("get_system_status");
+}
+
+async function exportSnapshots() {
+  state.probeResult = await api.invokeCommand("export_snapshots");
+}
+
+async function exportLivePaperTrading() {
+  state.probeResult = await api.invokeCommand("export_live_paper_trading");
+}
+
+async function exportAuditLogs() {
+  state.probeResult = await api.invokeCommand("export_audit_logs");
+}
+
+async function exportSnapshotResults() {
+  state.probeResult = await api.invokeCommand("export_snapshot_results");
+}
+
+async function exportStrategyDiagnostics() {
+  state.probeResult = await api.invokeCommand("export_strategy_diagnostics");
+}
+
+async function openBackupDir() {
+  state.probeResult = await api.invokeCommand("open_backup_dir");
+}
+
+async function settleBetRecommendations() {
+  state.probeResult = await api.invokeCommand("settle_bet_recommendations");
+  state.diagnostics = await api.invokeCommand("model_diagnostics");
+  state.backtest = await api.invokeCommand("backtest_report");
+}
+
+async function exportWorldcupSamples() {
+  state.probeResult = await api.invokeCommand("export_worldcup_training_samples");
+}
+
+async function runWorldcupClosureCycle() {
+  state.probeResult = await api.invokeCommand("run_worldcup_closure_cycle");
+  await loadStatus();
 }
 
 function numberOrNull(value) {
@@ -296,13 +373,22 @@ function numberOrNull(value) {
   return Number.isFinite(num) && num > 0 ? num : null;
 }
 
+function fileSize(bytes) {
+  const value = Number(bytes || 0);
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  if (value < 1024 * 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
 function sourceCards() {
   const sources = state.status?.sources || [];
   return sources.map(source => `
     <div class="panel span-4 metric">
       <span>${source.label}</span>
-      <strong>${source.ok ? "已缓存" : "未缓存"}</strong>
+      <strong>${source.health_label || (source.ok ? "正常" : "缺失")}</strong>
       <div class="muted">${source.updated_at || source.message}</div>
+      <div class="muted">置信 ${Number(source.confidence_score || 0).toFixed(0)} · 新鲜 ${Number(source.freshness_score || 0).toFixed(0)} · 完整 ${Number(source.completeness_score || 0).toFixed(0)}</div>
       <div>${source.count ? `${source.count} 条` : ""}</div>
     </div>
   `).join("");
@@ -358,7 +444,7 @@ function badge(text) {
 function recommendationRows(limit = 80) {
   const rows = state.recommendations.filter(item => state.recFilter === "全部" || item.tier === state.recFilter || item.decision === state.recFilter);
   if (!rows.length) {
-    return `<tr><td colspan="21" class="muted">暂无推荐。先在比赛中心点击“刷新核心数据”。</td></tr>`;
+    return `<tr><td colspan="23" class="muted">暂无推荐。先在比赛中心点击“刷新核心数据”。</td></tr>`;
   }
   return rows.slice(0, limit).map((item) => {
     const index = state.recommendations.indexOf(item);
@@ -381,8 +467,9 @@ function recommendationRows(limit = 80) {
       <td>${signedPct(item.advantage_rate)}</td>
       <td><strong>${item.data_grade || "-"}</strong><div class="muted">${Number(item.data_score || 0).toFixed(0)}分</div></td>
       <td>${item.quality_action || "-"}</td>
+      <td>${item.worldcup_correction_action || "-"}</td>
       <td>${money(item.stake_pct)}<div class="muted">${state.bankroll ? Math.round(item.stake_pct * state.bankroll.bankroll) : 0}</div></td>
-      <td>${badge(item.decision)} <span class="badge">${item.confidence}</span><div class="muted reason">${item.action_advice || item.play_style}</div><div class="muted reason">风险等级：${item.play_type_risk_level || "-"}</div><div class="muted reason">赔率异常：${item.anomaly_type || "-"} ${item.anomaly_severity || ""} ${item.anomaly_advice || ""}</div><div class="muted reason">${item.reason}</div><div class="muted reason">支持：${item.support_factors || "-"}</div><div class="muted reason">风险：${item.risk_factors || "-"}</div></td>
+      <td>${badge(item.final_decision || item.decision)}<div class="muted">${badge(item.decision)} <span class="badge">${item.confidence}</span></div><div class="muted reason">${item.action_advice || item.play_style}</div><div class="muted reason">风险等级：${item.play_type_risk_level || "-"}</div><div class="muted reason">赔率异常：${item.anomaly_type || "-"} ${item.anomaly_severity || ""} ${item.anomaly_advice || ""}</div><div class="muted reason">${item.reason}</div><div class="muted reason">支持：${item.support_factors || "-"}</div><div class="muted reason">风险：${item.risk_factors || "-"}</div></td>
       <td>${item.combo_group || "-"}</td>
       <td><button class="mini" data-action="save-rec" data-index="${index}">存复盘</button></td>
     </tr>
@@ -445,6 +532,52 @@ function compactPickRows(items = [], empty = "暂无") {
   `).join("");
 }
 
+function paperTradingSummaryHtml(source = state.backtest?.paper_trading) {
+  const paper = source || {};
+  const robustness = state.backtest?.strategy_robustness || {};
+  const upgrade = paper.candidate_upgrade_check || {};
+  const blocking = upgrade.blocking_reasons || [];
+  const robustBlocking = robustness.blocking_reasons || [];
+  const outlier = robustness.outlier_sensitivity || {};
+  const timeSegments = robustness.time_segments || [];
+  return `
+    <section class="panel span-12">
+      <h3>策略观察 / 纸面交易</h3>
+      <p class="muted">该策略仅用于模拟观察，不构成正式推荐。未达到样本和 ROI 要求前，不进入真实推荐。</p>
+      <div class="plan-grid">
+        <div><h4>候选策略</h4><p class="muted">${paper.strategy_id || "candidate_strategy_v1"}</p></div>
+        <div><h4>状态</h4><p class="muted">${paper.status === "observation_only" ? "观察中" : (paper.status || "未生成")}</p></div>
+        <div><h4>纸面样本</h4><p class="muted">${paper.bet_count || 0}</p></div>
+        <div><h4>纸面命中率</h4><p class="muted">${pct(paper.hit_rate || 0)}</p></div>
+      </div>
+      <div class="plan-grid">
+        <div><h4>纸面 ROI</h4><p class="muted">${signedPct(paper.paper_roi || 0)}</p></div>
+        <div><h4>最大回撤</h4><p class="muted">${Number(paper.max_drawdown || 0).toFixed(2)}</p></div>
+        <div><h4>平均赔率</h4><p class="muted">${paper.avg_odds ? odds(paper.avg_odds) : "-"}</p></div>
+        <div><h4>平均 EV</h4><p class="muted">${signedPct(paper.avg_ev || 0)}</p></div>
+      </div>
+      <div class="muted">升级检查：${upgrade.can_consider_upgrade ? "可考虑升级为小注，但不会自动启用" : "暂不可升级"}。${blocking.length ? `阻塞原因：${blocking.join("；")}` : (upgrade.upgrade_reason || "")}</div>
+      <div class="muted">风险提示：${paper.warning || "继续观察，不能自动改正式推荐规则。"}</div>
+      <h4>稳健性检验</h4>
+      <p class="muted">该策略当前仍处于观察状态。稳健性不足时，不应升级为真实推荐。</p>
+      <div class="plan-grid">
+        <div><h4>稳健性等级</h4><p class="muted">${robustness.robustness_level || "未生成"}</p></div>
+        <div><h4>最近30笔 ROI</h4><p class="muted">${robustness.rolling_30_roi == null ? "-" : signedPct(robustness.rolling_30_roi)}</p></div>
+        <div><h4>最近50笔 ROI</h4><p class="muted">${robustness.rolling_50_roi == null ? "-" : signedPct(robustness.rolling_50_roi)}</p></div>
+        <div><h4>最近100笔 ROI</h4><p class="muted">${robustness.rolling_100_roi == null ? "-" : signedPct(robustness.rolling_100_roi)}</p></div>
+      </div>
+      <div class="plan-grid">
+        <div><h4>时间稳定性</h4><p class="muted">${robustness.time_stability || "-"}</p></div>
+        <div><h4>赔率区间依赖</h4><p class="muted">${(robustness.blocking_reasons || []).includes("depends_on_single_odds_band") ? "依赖单一区间" : "未见单一区间依赖"}</p></div>
+        <div><h4>方向依赖</h4><p class="muted">${(robustness.blocking_reasons || []).includes("depends_on_single_selection") ? "依赖单一方向" : "未见单一方向依赖"}</p></div>
+        <div><h4>极端样本</h4><p class="muted">去Top5后 ${outlier.roi_after_remove_top5 == null ? "-" : signedPct(outlier.roi_after_remove_top5)}</p></div>
+      </div>
+      <div class="muted">稳健阻塞：${robustBlocking.length ? robustBlocking.join("；") : "暂无阻塞。"}</div>
+      <div class="muted">分段 ROI：${timeSegments.length ? timeSegments.map(row => `${row.group}:${signedPct(row.roi || 0)}`).join("；") : "暂无分段数据。"}</div>
+    </section>
+  `;
+}
+
 function todayPlanHtml() {
   const plan = state.todayPlan;
   if (!plan) {
@@ -464,10 +597,186 @@ function todayPlanHtml() {
         <span class="muted">${plan.review_hint || ""}</span>
       </section>
       <section class="panel span-12"><h3>等首发/等赔率提示</h3><p class="muted">${plan.wait_notes?.length ? plan.wait_notes.join("；") : "暂无等待提示。"}</p></section>
-      <section class="panel span-12 table-panel"><h3>单关候选</h3><div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>方向</th><th>模型</th><th>赔率/EV</th><th>操作建议</th></tr></thead><tbody>${compactPickRows(plan.singles, "暂无单关候选。")}</tbody></table></div></section>
+      <section class="panel span-12 table-panel"><h3>正式推荐</h3><p class="muted">${plan.singles?.length ? "通过当前风控的正式投注样本。" : "当前无通过风控的正式投注样本。"}</p><div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>方向</th><th>模型</th><th>赔率/EV</th><th>操作建议</th></tr></thead><tbody>${compactPickRows(plan.singles, "今日暂无通过风控的正式推荐。")}</tbody></table></div></section>
+      <section class="panel span-12 table-panel"><h3>小注候选</h3><p class="muted">小注候选仍受风控约束，不等于自动下注。</p><div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>方向</th><th>模型</th><th>赔率/EV</th><th>操作建议</th></tr></thead><tbody>${compactPickRows(plan.small_stake, "暂无小注候选。")}</tbody></table></div></section>
+      <section class="panel span-12 table-panel"><h3>策略观察</h3><p class="muted">模拟，不建议真实下注。</p><div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>方向</th><th>模型</th><th>赔率/EV</th><th>操作建议</th></tr></thead><tbody>${compactPickRows(plan.strategy_observation, "暂无策略观察候选。")}</tbody></table></div></section>
+      ${paperTradingSummaryHtml()}
       <section class="panel span-12 table-panel"><h3>二串一候选</h3><p class="muted">只从稳胆/让球稳胆里挑不同场次，总额不超过今日预算20%。</p><div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>方向</th><th>模型</th><th>赔率/EV</th><th>操作建议</th></tr></thead><tbody>${compactPickRows(plan.combos, "暂无合格二串一候选。")}</tbody></table></div></section>
       <section class="panel span-6 table-panel"><h3>观察清单</h3><div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>方向</th><th>模型</th><th>赔率/EV</th><th>操作建议</th></tr></thead><tbody>${compactPickRows(plan.watch, "暂无观察项。")}</tbody></table></div></section>
       <section class="panel span-6 table-panel"><h3>禁买清单</h3><div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>方向</th><th>模型</th><th>赔率/EV</th><th>操作建议</th></tr></thead><tbody>${compactPickRows(plan.banned, "暂无禁买项。")}</tbody></table></div></section>
+    </div>
+  `;
+}
+
+function snapshotForMatch(matchId) {
+  return (state.preMatchSnapshots || []).find(item => item.match_id === matchId && item.is_final_pre_match)
+    || (state.preMatchSnapshots || []).find(item => item.match_id === matchId);
+}
+
+function snapshotRows() {
+  const rows = state.matches || [];
+  if (!rows.length) {
+    return `<tr><td colspan="13" class="muted">暂无比赛。先刷新核心数据。</td></tr>`;
+  }
+  return rows.map(match => {
+    const snap = snapshotForMatch(match.id);
+    const model = snap?.model_probs_json?.[0] || {};
+    const oddsRow = snap?.odds_json?.[0] || {};
+    const evRow = snap?.ev_json?.[0] || {};
+    return `
+      <tr>
+        <td>${match.match_num || "-"}</td>
+        <td>${match.time || "-"}</td>
+        <td><strong>${rankedTeam(match.home)}</strong> vs <strong>${rankedTeam(match.away)}</strong></td>
+        <td>${snap ? snap.snapshot_time : "未生成"}</td>
+        <td>${snap?.is_final_pre_match ? badge("最终") : badge("普通")}</td>
+        <td>${model.pick ? `${model.pick} ${pct(model.model_prob || 0)}` : "-"}</td>
+        <td>${oddsRow.odds ? odds(oddsRow.odds) : "-"}</td>
+        <td>${evRow.ev == null ? "-" : signedPct(evRow.ev)}</td>
+        <td>${snap ? `${Number(snap.data_quality_score || 0).toFixed(0)}分` : "-"}</td>
+        <td>${snap ? `${snap.lineup_status} / ${Number(snap.lineup_confidence || 0).toFixed(0)}` : "-"}</td>
+        <td>${snap ? `${snap.injury_status} / ${Number(snap.injury_confidence || 0).toFixed(0)}` : "-"}</td>
+        <td>${snap ? badge(snap.final_decision) : "-"}</td>
+        <td>
+          <button class="mini" data-action="create-pre-snapshot" data-match-id="${match.id}">生成当前快照</button>
+          ${snap ? `<button class="mini" data-action="mark-final-snapshot" data-snapshot-id="${snap.id}">标记最终</button>` : ""}
+          ${snap ? `<button class="mini" data-action="settle-pre-snapshot" data-snapshot-id="${snap.id}">赛后结算</button>` : ""}
+        </td>
+      </tr>
+    `;
+  }).join("");
+}
+
+function auditRows() {
+  const rows = state.snapshotAuditLogs || [];
+  if (!rows.length) {
+    return `<tr><td colspan="7" class="muted">暂无审计问题。点击“运行快照审计”检查当前快照。</td></tr>`;
+  }
+  return rows.slice(0, 80).map(item => `
+    <tr>
+      <td>${rankedMatchLabel(item.match_label || item.match_id)}</td>
+      <td>${item.snapshot_time || "-"}</td>
+      <td>${item.kickoff_time || "-"}</td>
+      <td>${item.audit_type}</td>
+      <td>${badge(item.severity)}</td>
+      <td>${item.message}</td>
+      <td>${item.resolved ? "已解决" : "未解决"}</td>
+    </tr>
+  `).join("");
+}
+
+function livePaperRows() {
+  const rows = state.livePaperRecords || [];
+  if (!rows.length) {
+    return `<tr><td colspan="9" class="muted">暂无 live_pre_match 纸面交易记录。</td></tr>`;
+  }
+  return rows.slice(0, 10).map(item => `
+    <tr>
+      <td>${item.created_at || "-"}</td>
+      <td>${item.match_id || "-"}</td>
+      <td>${item.selection}</td>
+      <td>${item.play_type}</td>
+      <td>${pct(item.model_prob || 0)}</td>
+      <td>${odds(item.odds || 0)}</td>
+      <td>${signedPct(item.ev || 0)}</td>
+      <td>${item.result_status || "pending"}</td>
+      <td class="${(item.paper_profit || 0) >= 0 ? "down" : "up"}">${signedPct(item.paper_profit || 0)}</td>
+    </tr>
+  `).join("");
+}
+
+function systemStatusHtml() {
+  const status = state.systemStatus || {};
+  const lastBackup = status.last_backup || {};
+  return `
+    <section class="panel span-12">
+      <h3>系统状态</h3>
+      <div class="plan-grid">
+        <div><h4>应用版本</h4><p class="muted">${status.app_version || "v0.1-live-observation"}</p></div>
+        <div><h4>当前模型</h4><p class="muted">${status.model_version || state.activeModel?.model_version || "-"}</p></div>
+        <div><h4>世界杯修正层</h4><p class="muted">${status.worldcup_correction_version || state.activeModel?.worldcup_correction_version || "-"}</p></div>
+        <div><h4>策略状态</h4><p class="muted">${status.strategy_status || "observation_only"} · ${status.official_recommendation_status || "风控开启"}</p></div>
+      </div>
+      <div class="plan-grid">
+        <div><h4>数据库</h4><p class="muted">${fileSize(status.db_size_bytes || 0)}</p></div>
+        <div><h4>快照</h4><p class="muted">${status.snapshot_count || 0} 条 · final ${status.final_snapshot_count || 0}</p></div>
+        <div><h4>live 样本</h4><p class="muted">${status.live_pre_match_sample_count || 0} 条 · 已结算 ${status.live_pre_match_settled_count || 0}</p></div>
+        <div><h4>审计</h4><p class="muted">Critical ${status.audit_critical_count || 0} · Warning ${status.audit_warning_count || 0}</p></div>
+      </div>
+      <div class="plan-grid">
+        <div><h4>API-Football</h4><p class="muted">今日 ${status.api_football_today_requests || 0} / ${status.api_football_daily_limit || 100} · 剩余 ${status.api_football_remaining_requests ?? "-"}</p></div>
+        <div><h4>最近备份</h4><p class="muted">${lastBackup.created_at || "尚未备份"}</p></div>
+        <div><h4>未结算</h4><p class="muted">${status.live_pre_match_unsettled_count || 0} 条</p></div>
+        <div><h4>数据库路径</h4><p class="muted">${status.db_path || "-"}</p></div>
+      </div>
+    </section>
+  `;
+}
+
+function snapshotWorkflowHtml() {
+  return `
+    <section class="panel span-12">
+      <h3>日常使用流程</h3>
+      <div class="plan-grid">
+        ${["同步今日比赛", "生成赛前快照", "临近开赛同步首发/伤停", "标记 final snapshot", "比赛结束后结算", "查看 live_pre_match 纸面交易", "每天结束后备份数据"].map((step, index) => `
+          <div><h4>${index + 1}. ${step}</h4><p class="muted">${index === 6 ? "导出 ZIP 和 CSV，不包含 API Key 明文。" : "保持赛前数据冻结，赛后只写结算表。"}</p></div>
+        `).join("")}
+      </div>
+      <p class="muted">本版本用于真实赛前样本采集和纸面交易观察，不作为自动投注工具。</p>
+    </section>
+  `;
+}
+
+function preMatchSnapshotHtml() {
+  const snapshots = state.preMatchSnapshots || [];
+  const paperCount = snapshots.filter(item => item.paper_trade_enabled).length;
+  const audits = state.snapshotAuditLogs || [];
+  const criticalCount = audits.filter(item => item.severity === "critical" && !item.resolved).length;
+  const warningCount = audits.filter(item => item.severity === "warning" && !item.resolved).length;
+  const live = state.livePaperSummary || {};
+  return `
+    <div class="grid">
+      <section class="panel span-12 toolbar">
+        <button class="btn" data-action="create-today-pre-snapshots">批量生成今日快照</button>
+        <button class="btn secondary" data-action="refresh-external">同步 API-Football 数据</button>
+        <button class="btn secondary" data-action="audit-pre-snapshots">运行快照审计</button>
+        <button class="btn secondary" data-action="settle-all-pre-snapshots">赛后批量结算</button>
+        <button class="btn secondary" data-action="export-app-data">导出全部数据</button>
+        <button class="btn secondary" data-action="export-snapshots">导出赛前快照</button>
+        <button class="btn secondary" data-action="export-snapshot-results">导出赛后结算</button>
+        <button class="btn secondary" data-action="export-live-paper">导出纸面交易</button>
+        <button class="btn secondary" data-action="export-audit-logs">导出审计日志</button>
+        <button class="btn secondary" data-action="export-strategy-diagnostics">导出策略诊断</button>
+        <button class="btn ghost" data-action="open-backup-dir">打开备份目录</button>
+        <span class="muted">赛前快照一旦生成，不会被赛后结果覆盖；结算只写入独立结果表。</span>
+      </section>
+      ${systemStatusHtml()}
+      ${snapshotWorkflowHtml()}
+      <section class="panel span-3 metric"><span>快照数</span><strong>${snapshots.length}</strong><div class="muted">允许同场多快照</div></section>
+      <section class="panel span-3 metric"><span>最终快照</span><strong>${snapshots.filter(item => item.is_final_pre_match).length}</strong><div class="muted">每场最多一个</div></section>
+      <section class="panel span-3 metric"><span>纸面观察</span><strong>${paperCount}</strong><div class="muted">模拟，不建议真实下注</div></section>
+      <section class="panel span-3 metric"><span>数据提示</span><strong>保守</strong><div class="muted">首发/伤停缺失自动降级</div></section>
+      <section class="panel span-3 metric"><span>审计问题</span><strong>${audits.filter(item => !item.resolved).length}</strong><div class="muted">Critical ${criticalCount} · Warning ${warningCount}</div></section>
+      <section class="panel span-3 metric"><span>live 样本</span><strong>${live.sample_count || 0}</strong><div class="muted">已结算 ${live.settled_count || 0}</div></section>
+      <section class="panel span-3 metric"><span>live 命中率</span><strong>${pct(live.hit_rate || 0)}</strong><div class="muted">${live.warning || "真实赛前纸面交易"}</div></section>
+      <section class="panel span-3 metric"><span>live ROI</span><strong>${signedPct(live.paper_roi || 0)}</strong><div class="muted">近30 ${signedPct(live.recent_30_roi || 0)}</div></section>
+      <section class="panel span-3 metric"><span>live 盈亏</span><strong>${signedPct(live.total_paper_profit || 0)}</strong><div class="muted">投入 ${Number(live.total_paper_stake || 0).toFixed(0)}</div></section>
+      <section class="panel span-12">
+        <h3>赛前快照中心</h3>
+        <p class="muted">首发/伤停数据未确认时，当前使用基础模型，相关玩法降级观察。以下为策略观察样本，仅用于模拟记录，不建议真实下注。</p>
+        <div class="scroll-table">
+          <table><thead><tr><th>编号</th><th>开赛</th><th>比赛</th><th>快照时间</th><th>类型</th><th>模型概率</th><th>赔率</th><th>EV</th><th>数据</th><th>首发</th><th>伤停</th><th>决策</th><th>操作</th></tr></thead><tbody>${snapshotRows()}</tbody></table>
+        </div>
+      </section>
+      <section class="panel span-12 table-panel">
+        <h3>快照质量审计</h3>
+        <div class="scroll-table"><table><thead><tr><th>比赛</th><th>快照时间</th><th>开赛时间</th><th>审计类型</th><th>严重程度</th><th>问题说明</th><th>状态</th></tr></thead><tbody>${auditRows()}</tbody></table></div>
+      </section>
+      <section class="panel span-12 table-panel">
+        <h3>live_pre_match 真实纸面交易</h3>
+        <p class="muted">${live.warning || "只有 final snapshot 的赛前纸面交易默认进入统计。"}</p>
+        <div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛ID</th><th>方向</th><th>玩法</th><th>模型</th><th>赔率</th><th>EV</th><th>状态</th><th>纸面盈亏</th></tr></thead><tbody>${livePaperRows()}</tbody></table></div>
+      </section>
     </div>
   `;
 }
@@ -605,6 +914,53 @@ function anomalyRows() {
   `).join("");
 }
 
+function modelStatusCard() {
+  const model = state.activeModel || {};
+  const range = model.training_data_range || {};
+  const isAvailable = !!model.model_available;
+  const strategyRules = model.strategy_rules_summary || [];
+  const globalModels = model.global_models_summary || [];
+  const hasBacktestBets = Number(model.backtest_final_bet_count || 0) > 0;
+  const roiText = hasBacktestBets ? signedPct(model.backtest_roi || 0) : "暂无有效投注回测样本";
+  return `
+    <section class="panel span-12">
+      <h3>模型状态</h3>
+      <div class="plan-grid">
+        <div><h4>当前模型</h4><p class="muted">${isAvailable ? "训练模型" : "规则模型"} · ${model.model_version || "rules-dixon-coles-v1"}</p></div>
+        <div><h4>样本数量</h4><p class="muted">${model.sample_count || 0}</p></div>
+        <div><h4>数据范围</h4><p class="muted">${range.start || "-"} ~ ${range.end || "-"}</p></div>
+        <div><h4>回测ROI</h4><p class="muted">${roiText}</p></div>
+      </div>
+      <div class="plan-grid">
+        <div><h4>Accuracy</h4><p class="muted">${pct(model.accuracy || 0)}</p></div>
+        <div><h4>Log Loss</h4><p class="muted">${Number(model.log_loss || 0).toFixed(4)}</p></div>
+        <div><h4>Brier Score</h4><p class="muted">${Number(model.brier_score || 0).toFixed(4)}</p></div>
+        <div><h4>状态说明</h4><p class="muted">${isAvailable ? "训练模型只用于胜平负概率预测，不直接等于投注推荐。" : (model.fallback_reason || "未检测到训练模型，当前使用规则模型。")}</p></div>
+      </div>
+      <div class="plan-grid">
+        <div><h4>正式投注样本</h4><p class="muted">${model.backtest_final_bet_count || 0}</p></div>
+        <div><h4>最大回撤</h4><p class="muted">${Number(model.backtest_max_drawdown || 0).toFixed(2)}</p></div>
+        <div><h4>平均赔率</h4><p class="muted">${model.backtest_avg_odds ? odds(model.backtest_avg_odds) : "-"}</p></div>
+        <div><h4>平均EV</h4><p class="muted">${model.backtest_final_bet_count ? signedPct(model.backtest_avg_ev || 0) : "-"}</p></div>
+      </div>
+      <div class="muted">回测诊断：${model.backtest_warning || "按EV、概率差、风险标签和数据质量评估正式投注样本。"}</div>
+      <div class="plan-grid">
+        <div><h4>世界杯修正层</h4><p class="muted">${model.worldcup_correction_available ? `已启用 · ${model.worldcup_correction_version || "worldcup_live_correction_v1"}` : "未启用"}</p></div>
+        <div><h4>世界杯样本</h4><p class="muted">${model.worldcup_correction_sample_count || 0}</p></div>
+        <div><h4>修正层Accuracy</h4><p class="muted">${pct(model.worldcup_correction_accuracy || 0)}</p></div>
+        <div><h4>修正层LogLoss</h4><p class="muted">${Number(model.worldcup_correction_log_loss || 0).toFixed(4)}</p></div>
+      </div>
+      <div class="muted">世界杯修正层说明：${model.worldcup_correction_note || "只影响是否值得投注和推荐降级，不改写模型真实概率。"}</div>
+      <div class="toolbar source-actions">
+        <button class="btn" data-action="run-training-pipeline">自动下载训练数据并训练</button>
+        <span class="muted">${state.probeResult?.model ? `训练完成：${state.probeResult.model.model_version}` : "数据来自 Football-Data.co.uk CSV，API-Football 暂不参与历史训练。"}</span>
+      </div>
+      <div class="muted">${globalModels.length ? `全局模型覆盖：${globalModels.join("；")}` : "当前只显示规则模型覆盖。"}</div>
+      <div class="muted">${strategyRules.length ? `训练规则摘要：${strategyRules.join("；")}` : "暂无训练禁买规则摘要。"}</div>
+    </section>
+  `;
+}
+
 function resultRows() {
   if (!state.results.length) {
     return `<tr><td colspan="6" class="muted">暂无赛果缓存。点击“刷新赛果”。</td></tr>`;
@@ -626,14 +982,22 @@ function sourceHealthHtml() {
   return `
     <section class="panel span-12 table-panel">
       <h3>数据源健康监控</h3>
-      <table><thead><tr><th>数据源</th><th>状态</th><th>上次成功</th><th>数量</th><th>说明</th></tr></thead><tbody>
+      <table><thead><tr><th>数据源</th><th>状态</th><th>上次成功</th><th>数量</th><th>诊断</th><th>模型影响</th><th>下一步</th></tr></thead><tbody>
         ${sources.map(source => `
           <tr>
             <td>${source.label}</td>
-            <td>${badge(source.ok ? "正常" : "缺失")}</td>
-            <td>${source.updated_at || "-"}</td>
+            <td>${badge(source.health_label || (source.ok ? "正常" : "缺失"))}</td>
+            <td>${source.last_success_at || source.updated_at || "-"}</td>
             <td>${source.count || 0}</td>
-            <td>${source.ok ? "可用于模型计算" : "请在比赛中心刷新；外部接口失败时会保留旧缓存"}</td>
+            <td>
+              置信 ${Number(source.confidence_score || 0).toFixed(0)}
+              · 新鲜 ${Number(source.freshness_score || 0).toFixed(0)}
+              · 完整 ${Number(source.completeness_score || 0).toFixed(0)}
+              <div class="muted">${source.diagnosis || (source.using_stale_cache ? "失败但使用旧缓存" : source.message)}</div>
+              <div class="muted">${source.last_error_message || ""}</div>
+            </td>
+            <td>${source.impact || "-"}</td>
+            <td>${source.next_action || "-"}</td>
           </tr>
         `).join("")}
       </tbody></table>
@@ -661,6 +1025,122 @@ function backtestRows() {
       <td>${Number(item.log_loss || 0).toFixed(3)}</td>
     </tr>
   `).join("");
+}
+
+function banRuleRows() {
+  const rules = state.backtest?.ban_rules || [];
+  if (!rules.length) {
+    return `<tr><td colspan="8" class="muted">暂无结构化禁买规则。至少需要若干条已结算复盘样本。</td></tr>`;
+  }
+  return rules.map(rule => `
+    <tr>
+      <td>${rule.dimension}</td>
+      <td>${rule.group}</td>
+      <td>${rule.count}</td>
+      <td>${pct(rule.hit_rate)}</td>
+      <td class="${rule.roi >= 0 ? "down" : "up"}">${signedPct(rule.roi)}</td>
+      <td>${odds(rule.avg_odds)}</td>
+      <td>${rule.reason}</td>
+      <td>${rule.action}</td>
+    </tr>
+  `).join("");
+}
+
+function strategyPoolRows() {
+  const pools = state.backtest?.shadow_backtest?.pools || {};
+  const ordered = ["recommend_pool", "small_stake_pool", "observe_only_pool", "hard_ban_pool", "wait_pool"];
+  if (!Object.keys(pools).length) {
+    return `<tr><td colspan="8" class="muted">暂无影子回测数据。运行训练回测后生成。</td></tr>`;
+  }
+  return ordered.map(id => pools[id]).filter(Boolean).map(pool => `
+    <tr>
+      <td>${pool.label || pool.pool_id}</td>
+      <td>${pool.bet_count || pool.sample_count || 0}</td>
+      <td>${pct(pool.hit_rate || 0)}</td>
+      <td class="${(pool.roi || 0) >= 0 ? "down" : "up"}">${signedPct(pool.roi || 0)}</td>
+      <td>${Number(pool.max_drawdown || 0).toFixed(2)}</td>
+      <td>${pool.avg_odds ? odds(pool.avg_odds) : "-"}</td>
+      <td>${signedPct(pool.avg_ev || 0)}</td>
+      <td>${pct(pool.avg_model_prob || 0)}</td>
+    </tr>
+  `).join("");
+}
+
+function ruleDiagnosticsRows(kind) {
+  const source = state.backtest?.rule_diagnostics || {};
+  const rows = source[kind] || [];
+  const labels = {
+    effective_block: "有效防亏",
+    over_strict: "可能误杀",
+    sample_too_small: "样本不足",
+    neutral: "暂不调整"
+  };
+  if (!rows.length) {
+    return `<tr><td colspan="9" class="muted">暂无${labels[kind] || "规则"}。</td></tr>`;
+  }
+  return rows.map(rule => `
+    <tr>
+      <td>${rule.rule_name || rule.rule_id}</td>
+      <td>${rule.action}</td>
+      <td>${rule.matched_count || 0}</td>
+      <td>${pct(rule.hit_rate || 0)}</td>
+      <td class="${(rule.roi || 0) >= 0 ? "down" : "up"}">${signedPct(rule.roi || 0)}</td>
+      <td>${Number(rule.max_drawdown || 0).toFixed(2)}</td>
+      <td>${rule.avg_odds ? odds(rule.avg_odds) : "-"}</td>
+      <td>${signedPct(rule.avg_ev || 0)}</td>
+      <td>${labels[rule.classification] || rule.classification || "-"}</td>
+    </tr>
+  `).join("");
+}
+
+function candidateStrategyRows() {
+  const strategy = state.backtest?.candidate_strategy || {};
+  const rules = strategy.candidate_rules || [];
+  if (!rules.length) {
+    return `<tr><td colspan="7" class="muted">${(strategy.warnings || []).join("；") || "暂无候选策略。"}</td></tr>`;
+  }
+  return rules.map(rule => `
+    <tr>
+      <td>${rule.ev_threshold != null ? signedPct(rule.ev_threshold) : "-"}</td>
+      <td>${rule.odds_range || "-"}</td>
+      <td>${rule.probability_range || "-"}</td>
+      <td>${rule.bet_count || rule.sample_count || 0}</td>
+      <td>${pct(rule.hit_rate || 0)}</td>
+      <td class="${(rule.roi || 0) >= 0 ? "down" : "up"}">${signedPct(rule.roi || 0)}</td>
+      <td>${Number(rule.max_drawdown || 0).toFixed(2)}</td>
+    </tr>
+  `).join("");
+}
+
+function strategyDiagnosticsHtml() {
+  const strategy = state.backtest?.candidate_strategy || {};
+  return `
+    <section class="panel table-panel span-12">
+      <h3>策略诊断</h3>
+      <p class="muted">影子回测只诊断规则误杀，不会自动放宽正式推荐。候选策略状态：${strategy.status === "observation_only" ? "候选策略观察中" : (strategy.status || "未生成")}</p>
+      <div class="scroll-table">
+        <table><thead><tr><th>池子</th><th>样本</th><th>命中率</th><th>ROI</th><th>最大回撤</th><th>平均赔率</th><th>平均EV</th><th>平均模型概率</th></tr></thead><tbody>${strategyPoolRows()}</tbody></table>
+      </div>
+    </section>
+    <section class="panel table-panel span-12">
+      <h3>规则误杀诊断</h3>
+      <div class="scroll-table">
+        <table><thead><tr><th>规则</th><th>动作</th><th>命中样本</th><th>命中率</th><th>ROI</th><th>最大回撤</th><th>平均赔率</th><th>平均EV</th><th>结论</th></tr></thead><tbody>
+          ${ruleDiagnosticsRows("effective_block")}
+          ${ruleDiagnosticsRows("over_strict")}
+          ${ruleDiagnosticsRows("sample_too_small")}
+        </tbody></table>
+      </div>
+    </section>
+    ${paperTradingSummaryHtml()}
+    <section class="panel table-panel span-12">
+      <h3>候选策略观察</h3>
+      <p class="muted">${(strategy.warnings || []).join("；") || "候选策略默认不启用，需要人工确认后才能进入正式规则。"}</p>
+      <div class="scroll-table">
+        <table><thead><tr><th>EV阈值</th><th>赔率区间</th><th>概率区间</th><th>样本</th><th>命中率</th><th>ROI</th><th>最大回撤</th></tr></thead><tbody>${candidateStrategyRows()}</tbody></table>
+      </div>
+    </section>
+  `;
 }
 
 function bankrollHtml() {
@@ -758,7 +1238,40 @@ function bankrollHtml() {
 
 function externalSourcesHtml() {
   const config = state.externalConfig || { injury_url: "", lineup_url: "", stats_url: "", notes: "" };
+  const providerRows = (state.providers || []).map(provider => `
+    <tr>
+      <td>
+        <strong>${provider.name}</strong>
+        <div class="muted">${provider.provider_id}</div>
+      </td>
+      <td>${provider.supported_data_types?.join(" / ") || provider.data_type || "-"}</td>
+      <td>${provider.enabled ? badge("启用") : badge("禁用")}</td>
+      <td>${provider.requires_key ? (provider.key_configured ? badge("已配置") : badge("未配置")) : "无需 Key"}</td>
+      <td>${provider.last_success_at || "-"}</td>
+      <td>${provider.last_error_message || "-"}</td>
+      <td>${provider.today_requests || 0} / ${provider.daily_limit || "不限"}</td>
+      <td>${provider.hour_requests || 0} / ${provider.hourly_limit || "不限"}</td>
+      <td>${badge(provider.health_label || "字段缺失")}<div class="muted">置信 ${Number(provider.confidence_score || 0).toFixed(0)}</div></td>
+      <td>
+        ${provider.requires_key ? `<input id="provider-key-${provider.provider_id}" type="password" placeholder="${provider.key_configured ? "已配置，输入新 Key 可覆盖" : "输入 API Key"}">` : ""}
+        <div class="toolbar source-actions">
+          ${provider.requires_key ? `<button class="mini" data-action="save-provider-key" data-provider="${provider.provider_id}">保存Key</button><button class="mini danger" data-action="clear-provider-key" data-provider="${provider.provider_id}">清Key</button>` : ""}
+          <button class="mini" data-action="test-provider" data-provider="${provider.provider_id}">测试</button>
+          <button class="mini" data-action="toggle-provider" data-provider="${provider.provider_id}" data-enabled="${provider.enabled ? "false" : "true"}">${provider.enabled ? "禁用" : "启用"}</button>
+          <button class="mini danger" data-action="clear-provider-cache" data-provider="${provider.provider_id}">清缓存</button>
+        </div>
+      </td>
+    </tr>
+  `).join("");
   return `
+    <section class="panel span-12">
+      <h3>免费数据源 Provider Registry</h3>
+      <p class="muted">Key 只保存在本地设置中，页面不显示明文。网页抓取源只作为低可信补充，不当作官方强源。</p>
+      <div class="scroll-table">
+        <table><thead><tr><th>Provider</th><th>支持数据</th><th>启用</th><th>Key</th><th>最后成功</th><th>失败原因</th><th>今日请求</th><th>小时请求</th><th>健康度</th><th>操作</th></tr></thead><tbody>${providerRows || `<tr><td colspan="10" class="muted">暂无 provider registry。</td></tr>`}</tbody></table>
+      </div>
+      <p class="muted">${state.probeResult ? `${state.probeResult.message || "操作完成"}` : ""}</p>
+    </section>
     <section class="panel span-12">
       <h3>外部数据源配置</h3>
       <div class="toolbar">
@@ -778,7 +1291,7 @@ function externalSourcesHtml() {
       <div class="toolbar source-actions">
         <button class="btn" data-action="save-external">保存外部源</button>
         <button class="btn secondary" data-action="refresh-sporttery-injury">刷新竞彩网伤停</button>
-        <button class="btn secondary" data-action="refresh-external">刷新外部源缓存</button>
+        <button class="btn secondary" data-action="refresh-external">全局刷新数据源</button>
         <button class="btn secondary" data-action="probe-injury">测试伤停源</button>
         <button class="btn secondary" data-action="probe-lineup">测试首发源</button>
         <button class="btn secondary" data-action="probe-stats">测试统计源</button>
@@ -854,6 +1367,7 @@ function simHtml() {
         <section class="panel span-3 metric"><span>平局</span><strong>${pct(sim.draw)}</strong><div class="muted">95% ${ciText(sim.draw_low, sim.draw_high)}</div></section>
         <section class="panel span-3 metric"><span>客胜</span><strong>${pct(sim.away_win)}</strong><div class="muted">95% ${ciText(sim.away_win_low, sim.away_win_high)} · λ ${sim.lambda_away.toFixed(2)}</div></section>
         <section class="panel span-3 metric"><span>大2.5 / 双方进球</span><strong>${pct(sim.over_25)}</strong><div class="muted">大2.5区间 ${ciText(sim.over_25_low, sim.over_25_high)} · BTTS ${pct(sim.btts)}</div></section>
+        <section class="panel span-12"><h3>当前概率模型</h3><p class="muted">${sim.model_version || "rules-dixon-coles-v1"}；投注推荐层独立按赔率、EV、数据质量和风险标签过滤，不直接训练“买/不买”。</p></section>
         <section class="panel span-8">
           <h3>综合概率对比</h3>
           <table>
@@ -931,6 +1445,7 @@ function viewHtml() {
           <button class="btn" data-action="refresh-core">刷新核心数据</button>
           <button class="btn secondary" data-action="refresh-xg">刷新 StatsBomb xG</button>
         </section>
+        ${modelStatusCard()}
         ${sourceCards()}
         <section class="panel span-12">
           <h3>比赛中心</h3>
@@ -953,6 +1468,7 @@ function viewHtml() {
   }
   if (state.view === "sim") return simHtml();
   if (state.view === "today") return todayPlanHtml();
+  if (state.view === "snapshots") return preMatchSnapshotHtml();
   if (state.view === "recommend") {
     const buyCount = state.recommendations.filter(item => item.decision === "可买").length;
     const watchCount = state.recommendations.filter(item => item.decision === "观察").length;
@@ -976,7 +1492,7 @@ function viewHtml() {
         <section class="panel span-12 table-panel">
           <h3>推荐榜</h3>
           <div class="scroll-table">
-            <table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>方向</th><th>推荐等级</th><th>模型概率</th><th>体彩去水</th><th>欧洲概率</th><th>对体彩差</th><th>对欧洲差</th><th>公平赔率</th><th>当前赔率</th><th>欧洲均赔</th><th>EV</th><th>优势率</th><th>数据</th><th>数据建议</th><th>仓位</th><th>是否值得投注</th><th>组合组</th><th>操作</th></tr></thead><tbody>${recommendationRows(100)}</tbody></table>
+            <table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>方向</th><th>推荐等级</th><th>模型概率</th><th>体彩去水</th><th>欧洲概率</th><th>对体彩差</th><th>对欧洲差</th><th>公平赔率</th><th>当前赔率</th><th>欧洲均赔</th><th>EV</th><th>优势率</th><th>数据</th><th>数据建议</th><th>世界杯修正</th><th>仓位</th><th>最终决策</th><th>组合组</th><th>操作</th></tr></thead><tbody>${recommendationRows(100)}</tbody></table>
           </div>
         </section>
       </div>
@@ -1014,9 +1530,13 @@ function viewHtml() {
   if (state.view === "results") {
     return `
       <section class="panel span-12 toolbar">
+        <button class="btn" data-action="collect-worldcup-snapshot">赛前闭环采集</button>
         <button class="btn" data-action="refresh-results">刷新赛果</button>
+        <button class="btn secondary" data-action="settle-bet-recs">结算推荐样本</button>
+        <button class="btn secondary" data-action="export-worldcup-samples">导出训练样本</button>
+        <button class="btn danger" data-action="run-worldcup-cycle">一键闭环</button>
         <button class="btn secondary" data-action="auto-settle">按赛果自动结算复盘</button>
-        <span class="muted">赛果源：足彩网世界杯赛程页；若页面结构变化，仍可手动结算。</span>
+        <span class="muted">赛前冻结赔率/概率，赛后写入真实比分，形成世界杯修正层训练样本。</span>
       </section>
       <section class="panel table-panel">
         <h3>世界杯赛果</h3>
@@ -1035,7 +1555,10 @@ function viewHtml() {
   if (state.view === "review") {
     return `
       <section class="panel span-12 toolbar">
+        <button class="btn" data-action="collect-worldcup-snapshot">赛前闭环采集</button>
         <button class="btn" data-action="refresh-results">刷新赛果</button>
+        <button class="btn secondary" data-action="settle-bet-recs">结算推荐样本</button>
+        <button class="btn secondary" data-action="export-worldcup-samples">导出训练样本</button>
         <button class="btn secondary" data-action="auto-settle">自动结算复盘</button>
         <span class="muted">支持胜平负、让球胜平负、总进球、比分。未匹配到赛果的记录会保留未结算。</span>
       </section>
@@ -1047,10 +1570,17 @@ function viewHtml() {
           <div><h4>建议禁买规则</h4><p class="muted">${state.backtest?.ban_rule_advice || "样本不足"}</p></div>
         </div>
       </section>
+      ${strategyDiagnosticsHtml()}
       <section class="panel table-panel">
         <h3>历史回测分组</h3>
         <div class="scroll-table">
           <table><thead><tr><th>维度</th><th>分组</th><th>次数</th><th>命中率</th><th>ROI</th><th>总盈利</th><th>最大回撤</th><th>平均赔率</th><th>平均优势率</th><th>Brier</th><th>LogLoss</th></tr></thead><tbody>${backtestRows()}</tbody></table>
+        </div>
+      </section>
+      <section class="panel table-panel">
+        <h3>禁买规则明细</h3>
+        <div class="scroll-table">
+          <table><thead><tr><th>维度</th><th>分组</th><th>样本</th><th>命中率</th><th>ROI</th><th>均赔</th><th>原因</th><th>操作</th></tr></thead><tbody>${banRuleRows()}</tbody></table>
         </div>
       </section>
       <section class="panel table-panel"><h3>复盘中心</h3><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>选择</th><th>模型概率</th><th>赔率</th><th>概率差</th><th>仓位</th><th>决策</th><th>赛果</th><th>盈亏</th><th>操作</th></tr></thead><tbody>${predictionRows()}</tbody></table></section>
@@ -1061,6 +1591,7 @@ function viewHtml() {
   }
   return `
     <div class="grid">
+      ${modelStatusCard()}
       ${sourceCards()}
       ${sourceHealthHtml()}
       ${externalSourcesHtml()}
@@ -1113,8 +1644,8 @@ document.addEventListener("click", event => {
   if (action === "refresh-xg") safeRun("刷新 StatsBomb xG", refreshXg);
   if (action === "refresh-results") safeRun("刷新赛果", async () => {
     await refreshResults();
-    state.diagnostics = await invoke("model_diagnostics");
-    state.backtest = await invoke("backtest_report");
+    state.diagnostics = await api.invokeCommand("model_diagnostics");
+    state.backtest = await api.invokeCommand("backtest_report");
   });
   if (action === "import-historical") safeRun("导入历史样本", importHistoricalResults);
   if (action === "import-player-status") safeRun("导入球员状态", importPlayerStatus);
@@ -1131,18 +1662,35 @@ document.addEventListener("click", event => {
   }
   if (action === "auto-settle") safeRun("自动结算", async () => {
     await autoSettle();
-    state.backtest = await invoke("backtest_report");
+    state.backtest = await api.invokeCommand("backtest_report");
   });
   if (action === "simulate") safeRun("运行模拟", runSimulation);
   if (action === "refresh-recommend") safeRun("生成推荐", async () => {
-    state.recommendations = await invoke("list_recommendations");
-    state.todayPlan = await invoke("today_bet_plan");
+    state.recommendations = await api.invokeCommand("list_recommendations");
+    state.todayPlan = await api.invokeCommand("today_bet_plan");
   });
   if (action === "refresh-analysis") safeRun("刷新单场分析", async () => {
-    state.analyses = await invoke("list_match_analyses");
+    state.analyses = await api.invokeCommand("list_match_analyses");
   });
   if (action === "save-rec") safeRun("保存复盘", async () => saveRecommendation(event.target.dataset.index));
   if (action === "freeze-rec") safeRun("冻结赛前快照", freezeRecommendations);
+  if (action === "collect-worldcup-snapshot") safeRun("赛前闭环采集", collectWorldcupSnapshot);
+  if (action === "create-pre-snapshot") safeRun("生成当前快照", async () => createPreMatchSnapshot(event.target.dataset.matchId));
+  if (action === "create-today-pre-snapshots") safeRun("批量生成今日快照", createTodayPreMatchSnapshots);
+  if (action === "audit-pre-snapshots") safeRun("运行快照审计", auditPreMatchSnapshots);
+  if (action === "mark-final-snapshot") safeRun("标记最终快照", async () => markFinalPreMatchSnapshot(event.target.dataset.snapshotId));
+  if (action === "settle-pre-snapshot") safeRun("赛后结算快照", async () => settlePreMatchSnapshot(event.target.dataset.snapshotId));
+  if (action === "settle-all-pre-snapshots") safeRun("批量结算快照", settleAllFinishedSnapshots);
+  if (action === "export-app-data") safeRun("导出全部数据", exportAppData);
+  if (action === "export-snapshots") safeRun("导出赛前快照", exportSnapshots);
+  if (action === "export-snapshot-results") safeRun("导出赛后结算", exportSnapshotResults);
+  if (action === "export-live-paper") safeRun("导出纸面交易", exportLivePaperTrading);
+  if (action === "export-audit-logs") safeRun("导出审计日志", exportAuditLogs);
+  if (action === "export-strategy-diagnostics") safeRun("导出策略诊断", exportStrategyDiagnostics);
+  if (action === "open-backup-dir") safeRun("打开备份目录", openBackupDir);
+  if (action === "settle-bet-recs") safeRun("结算推荐样本", settleBetRecommendations);
+  if (action === "export-worldcup-samples") safeRun("导出训练样本", exportWorldcupSamples);
+  if (action === "run-worldcup-cycle") safeRun("执行世界杯闭环", runWorldcupClosureCycle);
   if (action === "delete-prediction") safeRun("删除复盘", async () => deletePrediction(event.target.dataset.id));
   if (action === "settle-hit") safeRun("结算命中", async () => settlePrediction(event.target.dataset.id, true));
   if (action === "settle-miss") safeRun("结算未中", async () => settlePrediction(event.target.dataset.id, false));
@@ -1153,6 +1701,12 @@ document.addEventListener("click", event => {
   if (action === "probe-injury") safeRun("测试伤停源", async () => probeExternal(document.querySelector("#injury-url")?.value || ""));
   if (action === "probe-lineup") safeRun("测试首发源", async () => probeExternal(document.querySelector("#lineup-url")?.value || ""));
   if (action === "probe-stats") safeRun("测试统计源", async () => probeExternal(document.querySelector("#stats-url")?.value || ""));
+  if (action === "save-provider-key") safeRun("保存 Provider Key", async () => saveProviderCredential(event.target.dataset.provider));
+  if (action === "clear-provider-key") safeRun("清除 Provider Key", async () => clearProviderCredential(event.target.dataset.provider));
+  if (action === "test-provider") safeRun("测试 Provider", async () => testProvider(event.target.dataset.provider));
+  if (action === "toggle-provider") safeRun("切换 Provider", async () => toggleProvider(event.target.dataset.provider, event.target.dataset.enabled === "true"));
+  if (action === "clear-provider-cache") safeRun("清除 Provider 缓存", async () => clearProviderCache(event.target.dataset.provider));
+  if (action === "run-training-pipeline") safeRun("自动下载训练数据并训练", runTrainingPipeline);
   if (action === "save-model") safeRun("保存模型阈值", saveModelSettings);
   if (action === "auto-tune") safeRun("自动调权", autoTuneModel);
 });

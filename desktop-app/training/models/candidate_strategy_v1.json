@@ -1,0 +1,32 @@
+{
+  "strategy_id": "candidate_strategy_v1",
+  "status": "observation_only",
+  "generated_at": "2026-06-29T05:18:32Z",
+  "source_reports": [
+    "reports/threshold_scan_summary.json",
+    "reports/rule_diagnostics.json",
+    "reports/shadow_backtest_summary.json"
+  ],
+  "candidate_rules": [
+    {
+      "ev_threshold": 0.0,
+      "odds_range": "3.00+",
+      "probability_range": "<40%",
+      "sample_count": 242,
+      "bet_count": 242,
+      "hit_rate": 0.2975206611570248,
+      "roi": 0.017355371900826443,
+      "max_drawdown": 24.700000000000003,
+      "avg_odds": 3.59400826446281,
+      "avg_ev": 0.0065292125067062425
+    }
+  ],
+  "positive_candidate_rules": [],
+  "expected_roi": 0.017355371900826443,
+  "sample_count": 242,
+  "max_drawdown": 24.700000000000003,
+  "warnings": [
+    "候选策略默认不启用，只作为观察诊断。",
+    "未发现样本充足且ROI明显为正的阈值组合。"
+  ]
+}

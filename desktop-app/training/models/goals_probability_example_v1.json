@@ -1,0 +1,183 @@
+{
+  "score_probs": [
+    {
+      "score": "0:0",
+      "probability": 0.09099527792528803
+    },
+    {
+      "score": "0:1",
+      "probability": 0.10464456961408124
+    },
+    {
+      "score": "0:2",
+      "probability": 0.060170627528096696
+    },
+    {
+      "score": "0:3",
+      "probability": 0.02306540721910373
+    },
+    {
+      "score": "0:4",
+      "probability": 0.0066313045754923215
+    },
+    {
+      "score": "0:5",
+      "probability": 0.001525200052363234
+    },
+    {
+      "score": "1:0",
+      "probability": 0.11374409740661004
+    },
+    {
+      "score": "1:1",
+      "probability": 0.13080571201760152
+    },
+    {
+      "score": "1:2",
+      "probability": 0.07521328441012086
+    },
+    {
+      "score": "1:3",
+      "probability": 0.028831759023879664
+    },
+    {
+      "score": "1:4",
+      "probability": 0.008289130719365403
+    },
+    {
+      "score": "1:5",
+      "probability": 0.0019065000654540428
+    },
+    {
+      "score": "2:0",
+      "probability": 0.07109006087913126
+    },
+    {
+      "score": "2:1",
+      "probability": 0.08175357001100095
+    },
+    {
+      "score": "2:2",
+      "probability": 0.047008302756325546
+    },
+    {
+      "score": "2:3",
+      "probability": 0.01801984938992479
+    },
+    {
+      "score": "2:4",
+      "probability": 0.005180706699603376
+    },
+    {
+      "score": "2:5",
+      "probability": 0.0011915625409087767
+    },
+    {
+      "score": "3:0",
+      "probability": 0.029620858699638028
+    },
+    {
+      "score": "3:1",
+      "probability": 0.03406398750458373
+    },
+    {
+      "score": "3:2",
+      "probability": 0.01958679281513564
+    },
+    {
+      "score": "3:3",
+      "probability": 0.007508270579135329
+    },
+    {
+      "score": "3:4",
+      "probability": 0.0021586277915014067
+    },
+    {
+      "score": "3:5",
+      "probability": 0.0004964843920453236
+    },
+    {
+      "score": "4:0",
+      "probability": 0.009256518343636885
+    },
+    {
+      "score": "4:1",
+      "probability": 0.010644996095182416
+    },
+    {
+      "score": "4:2",
+      "probability": 0.006120872754729887
+    },
+    {
+      "score": "4:3",
+      "probability": 0.0023463345559797903
+    },
+    {
+      "score": "4:4",
+      "probability": 0.0006745711848441895
+    },
+    {
+      "score": "4:5",
+      "probability": 0.00015515137251416363
+    },
+    {
+      "score": "5:0",
+      "probability": 0.002314129585909221
+    },
+    {
+      "score": "5:1",
+      "probability": 0.0026612490237956045
+    },
+    {
+      "score": "5:2",
+      "probability": 0.001530218188682472
+    },
+    {
+      "score": "5:3",
+      "probability": 0.0005865836389949477
+    },
+    {
+      "score": "5:4",
+      "probability": 0.0001686427962110474
+    },
+    {
+      "score": "5:5",
+      "probability": 3.8787843128540915e-05
+    }
+  ],
+  "total_goals_probs": [
+    {
+      "total_goals": "0",
+      "probability": 0.09099527792528803
+    },
+    {
+      "total_goals": "1",
+      "probability": 0.21838866702069126
+    },
+    {
+      "total_goals": "2",
+      "probability": 0.2620664004248295
+    },
+    {
+      "total_goals": "3",
+      "probability": 0.20965312033986355
+    },
+    {
+      "total_goals": "4",
+      "probability": 0.12579187220391816
+    },
+    {
+      "total_goals": "5",
+      "probability": 0.06038009865788071
+    },
+    {
+      "total_goals": "6",
+      "probability": 0.02337759912271824
+    },
+    {
+      "total_goals": "7+",
+      "probability": 0.009346964304810657
+    }
+  ],
+  "created_at": "2026-06-28T18:31:05Z"
+}

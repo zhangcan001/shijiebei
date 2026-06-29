@@ -1,0 +1,2 @@
+ev_threshold,odds_range,probability_range,sample_count,bet_count,hit_rate,roi,max_drawdown,avg_odds,avg_ev
+0.0,3.00+,<40%,242,242,0.2975206611570248,0.017355371900826443,24.700000000000003,3.59400826446281,0.0065292125067062425

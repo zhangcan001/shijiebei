@@ -1,0 +1,493 @@
+{
+  "active_model_version": "outcome_ensemble_model_v1+probability_blend_v1",
+  "outcome_model_path": "outcome_model_v1.json",
+  "outcome_ensemble_model_path": "outcome_ensemble_model_v1.json",
+  "calibrator_path": "calibrator_v1.json",
+  "probability_blend_path": "probability_blend_v1.json",
+  "feature_schema_path": "feature_schema_v1.json",
+  "strategy_rules_path": "strategy_rules_v1.json",
+  "goals_home_model_path": "goals_home_model_v1.json",
+  "goals_away_model_path": "goals_away_model_v1.json",
+  "handicap_model_path": "handicap_mapping_model_v1.json",
+  "created_at": "2026-06-29T05:18:32Z",
+  "training_data_range": {
+    "start": "2019-07-26",
+    "end": "2026-05-31",
+    "train_count": 37913,
+    "valid_count": 9479
+  },
+  "metrics_summary": {
+    "sample_count": 47392,
+    "train_count": 37913,
+    "valid_count": 9479,
+    "accuracy": 0.5075429897668531,
+    "log_loss": 0.9991012640602721,
+    "brier_score": 0.1989969519481723,
+    "date_range": {
+      "start": "2019-07-26",
+      "end": "2026-05-31"
+    },
+    "member_metrics": {
+      "logistic": {
+        "accuracy": 0.4764215634560608,
+        "log_loss": 1.0184314010421742,
+        "brier_score": 0.20351556207582333
+      },
+      "hist_gbdt": {
+        "accuracy": 0.5074374934064775,
+        "log_loss": 1.000566216985546,
+        "brier_score": 0.1993293332416091
+      },
+      "extra_trees": {
+        "accuracy": 0.478320497942821,
+        "log_loss": 1.0176608527844555,
+        "brier_score": 0.20325126540377614
+      }
+    },
+    "probability_blend": {
+      "model_weight": 0.05,
+      "market_weight": 0.95,
+      "accuracy": 0.5075429897668531,
+      "log_loss": 0.9991012640602721,
+      "brier_score": 0.1989969519481723
+    }
+  },
+  "backtest_summary": {
+    "sample_count": 47392,
+    "validation_count": 9479,
+    "candidate_count": 28437,
+    "final_bet_count": 0,
+    "recommend_count": 0,
+    "small_stake_count": 0,
+    "skipped_count": 28437,
+    "hard_ban_count": 28180,
+    "observe_only_count": 257,
+    "total_stake": 0.0,
+    "total_profit": 0.0,
+    "roi": 0.0,
+    "max_drawdown": 0.0,
+    "avg_odds": 0.0,
+    "avg_ev": 0.0,
+    "avg_model_prob": 0.0,
+    "warning": "暂无正式投注样本，不能评估 ROI",
+    "shadow_backtest_path": "reports/shadow_backtest_summary.json",
+    "rule_diagnostics_path": "reports/rule_diagnostics.json",
+    "threshold_scan_path": "reports/threshold_scan_summary.json",
+    "candidate_strategy_path": "training/models/candidate_strategy_v1.json",
+    "paper_trading_backtest_path": "reports/paper_trading_backtest_summary.json",
+    "strategy_robustness_path": "reports/strategy_robustness_summary.json"
+  },
+  "paper_trading_summary": {
+    "strategy_id": "candidate_strategy_v1",
+    "status": "observation_only",
+    "created_at": "2026-06-29T05:18:32Z",
+    "sample_count": 242,
+    "bet_count": 242,
+    "hit_count": 72,
+    "hit_rate": 0.2975206611570248,
+    "total_paper_stake": 242.0,
+    "total_paper_profit": 4.199999999999999,
+    "paper_roi": 0.017355371900826443,
+    "max_drawdown": 24.700000000000003,
+    "avg_odds": 3.59400826446281,
+    "avg_ev": 0.0065292125067062425,
+    "avg_model_prob": 0.29296085960471097,
+    "warning": "",
+    "candidate_upgrade_check": {
+      "can_consider_upgrade": false,
+      "upgrade_reason": "未达到升级条件",
+      "blocking_reasons": [
+        "纸面交易ROI低于3%"
+      ],
+      "recent_30_roi": 0.06666666666666667
+    },
+    "note": "该策略仅用于模拟观察，不构成正式推荐。"
+  },
+  "strategy_robustness_summary": {
+    "strategy_id": "candidate_strategy_v1",
+    "status": "observation_only",
+    "created_at": "2026-06-29T05:18:32Z",
+    "robustness_level": "moderate",
+    "can_consider_upgrade": false,
+    "time_stability": "unstable_by_time",
+    "time_segments": [
+      {
+        "check_type": "time_segment",
+        "group": "segment_1",
+        "sample_count": 49,
+        "bet_count": 49,
+        "hit_count": 17,
+        "hit_rate": 0.3469387755102041,
+        "total_stake": 49.0,
+        "total_profit": 8.3,
+        "roi": 0.16938775510204082,
+        "max_drawdown": 9.0,
+        "avg_odds": 3.357142857142857,
+        "avg_ev": 0.005909951521125572,
+        "avg_model_prob": 0.3006126151765279
+      },
+      {
+        "check_type": "time_segment",
+        "group": "segment_2",
+        "sample_count": 49,
+        "bet_count": 49,
+        "hit_count": 14,
+        "hit_rate": 0.2857142857142857,
+        "total_stake": 49.0,
+        "total_profit": -1.6999999999999997,
+        "roi": -0.0346938775510204,
+        "max_drawdown": 11.0,
+        "avg_odds": 3.941836734693877,
+        "avg_ev": 0.008491204724431009,
+        "avg_model_prob": 0.2909564052898036
+      },
+      {
+        "check_type": "time_segment",
+        "group": "segment_3",
+        "sample_count": 48,
+        "bet_count": 48,
+        "hit_count": 15,
+        "hit_rate": 0.3125,
+        "total_stake": 48.0,
+        "total_profit": 2.8000000000000003,
+        "roi": 0.05833333333333334,
+        "max_drawdown": 10.0,
+        "avg_odds": 3.428125,
+        "avg_ev": 0.006335893680878873,
+        "avg_model_prob": 0.29432606795593297
+      },
+      {
+        "check_type": "time_segment",
+        "group": "segment_4",
+        "sample_count": 48,
+        "bet_count": 48,
+        "hit_count": 13,
+        "hit_rate": 0.2708333333333333,
+        "total_stake": 48.0,
+        "total_profit": -3.500000000000001,
+        "roi": -0.07291666666666669,
+        "max_drawdown": 16.5,
+        "avg_odds": 3.422916666666667,
+        "avg_ev": 0.006154049742163467,
+        "avg_model_prob": 0.2949675120437438
+      },
+      {
+        "check_type": "time_segment",
+        "group": "segment_5",
+        "sample_count": 48,
+        "bet_count": 48,
+        "hit_count": 13,
+        "hit_rate": 0.2708333333333333,
+        "total_stake": 48.0,
+        "total_profit": -1.7000000000000002,
+        "roi": -0.03541666666666667,
+        "max_drawdown": 14.1,
+        "avg_odds": 3.8177083333333335,
+        "avg_ev": 0.0057269892975957025,
+        "avg_model_prob": 0.28382404544802753
+      }
+    ],
+    "rolling_30_roi": 0.06666666666666667,
+    "rolling_50_roi": -0.008000000000000007,
+    "rolling_100_roi": -0.05700000000000001,
+    "rolling_min_roi": -0.05700000000000001,
+    "rolling_max_drawdown": 18.5,
+    "odds_band_results": [
+      {
+        "check_type": "odds_band",
+        "group": "1.10-1.30",
+        "sample_count": 0,
+        "bet_count": 0,
+        "hit_count": 0,
+        "hit_rate": 0.0,
+        "total_stake": 0.0,
+        "total_profit": 0.0,
+        "roi": 0.0,
+        "max_drawdown": 0.0,
+        "avg_odds": 0.0,
+        "avg_ev": 0.0,
+        "avg_model_prob": 0.0
+      },
+      {
+        "check_type": "odds_band",
+        "group": "1.30-1.50",
+        "sample_count": 0,
+        "bet_count": 0,
+        "hit_count": 0,
+        "hit_rate": 0.0,
+        "total_stake": 0.0,
+        "total_profit": 0.0,
+        "roi": 0.0,
+        "max_drawdown": 0.0,
+        "avg_odds": 0.0,
+        "avg_ev": 0.0,
+        "avg_model_prob": 0.0
+      },
+      {
+        "check_type": "odds_band",
+        "group": "1.50-1.80",
+        "sample_count": 0,
+        "bet_count": 0,
+        "hit_count": 0,
+        "hit_rate": 0.0,
+        "total_stake": 0.0,
+        "total_profit": 0.0,
+        "roi": 0.0,
+        "max_drawdown": 0.0,
+        "avg_odds": 0.0,
+        "avg_ev": 0.0,
+        "avg_model_prob": 0.0
+      },
+      {
+        "check_type": "odds_band",
+        "group": "1.80-2.20",
+        "sample_count": 0,
+        "bet_count": 0,
+        "hit_count": 0,
+        "hit_rate": 0.0,
+        "total_stake": 0.0,
+        "total_profit": 0.0,
+        "roi": 0.0,
+        "max_drawdown": 0.0,
+        "avg_odds": 0.0,
+        "avg_ev": 0.0,
+        "avg_model_prob": 0.0
+      },
+      {
+        "check_type": "odds_band",
+        "group": "2.20-3.00",
+        "sample_count": 0,
+        "bet_count": 0,
+        "hit_count": 0,
+        "hit_rate": 0.0,
+        "total_stake": 0.0,
+        "total_profit": 0.0,
+        "roi": 0.0,
+        "max_drawdown": 0.0,
+        "avg_odds": 0.0,
+        "avg_ev": 0.0,
+        "avg_model_prob": 0.0
+      },
+      {
+        "check_type": "odds_band",
+        "group": "3.00+",
+        "sample_count": 242,
+        "bet_count": 242,
+        "hit_count": 72,
+        "hit_rate": 0.2975206611570248,
+        "total_stake": 242.0,
+        "total_profit": 4.199999999999999,
+        "roi": 0.017355371900826443,
+        "max_drawdown": 24.700000000000003,
+        "avg_odds": 3.59400826446281,
+        "avg_ev": 0.006529212506706191,
+        "avg_model_prob": 0.29296085960471097
+      }
+    ],
+    "selection_results": [
+      {
+        "check_type": "selection",
+        "group": "H",
+        "sample_count": 1,
+        "bet_count": 1,
+        "hit_count": 0,
+        "hit_rate": 0.0,
+        "total_stake": 1.0,
+        "total_profit": -1.0,
+        "roi": -1.0,
+        "max_drawdown": 1.0,
+        "avg_odds": 19.0,
+        "avg_ev": 0.0092927338123225,
+        "avg_model_prob": 0.0531206702006485
+      },
+      {
+        "check_type": "selection",
+        "group": "D",
+        "sample_count": 240,
+        "bet_count": 240,
+        "hit_count": 72,
+        "hit_rate": 0.3,
+        "total_stake": 240.0,
+        "total_profit": 6.199999999999999,
+        "roi": 0.02583333333333333,
+        "max_drawdown": 24.700000000000003,
+        "avg_odds": 3.423958333333333,
+        "avg_ev": 0.006498347452131314,
+        "avg_model_prob": 0.2950355804548482
+      },
+      {
+        "check_type": "selection",
+        "group": "A",
+        "sample_count": 1,
+        "bet_count": 1,
+        "hit_count": 0,
+        "hit_rate": 0.0,
+        "total_stake": 1.0,
+        "total_profit": -1.0,
+        "roi": -1.0,
+        "max_drawdown": 1.0,
+        "avg_odds": 29.0,
+        "avg_ev": 0.0111733042990607,
+        "avg_model_prob": 0.0348680449758296
+      }
+    ],
+    "positive_odds_bands": [
+      "3.00+"
+    ],
+    "positive_selections": [
+      "D"
+    ],
+    "outlier_sensitivity": {
+      "roi_after_remove_top1": 0.004149377593360992,
+      "roi_after_remove_top3": -0.019037656903765694,
+      "roi_after_remove_top5": -0.04219409282700422,
+      "roi_after_remove_top10pct": -0.26605504587155965
+    },
+    "blocking_reasons": [
+      "paper_roi_below_3pct",
+      "unstable_by_time",
+      "recent_50_roi_negative",
+      "depends_on_single_odds_band",
+      "depends_on_single_selection",
+      "fragile_to_outliers",
+      "profit_concentrated_in_few_games",
+      "robustness_not_strong"
+    ],
+    "positive_evidence": [],
+    "warnings": [],
+    "conclusion": "该策略当前仍处于观察状态。稳健性不足时，不应升级为真实推荐。"
+  },
+  "model_objectives": {
+    "primary": [
+      "log_loss",
+      "brier_score",
+      "calibration_quality"
+    ],
+    "betting": [
+      "roi",
+      "max_drawdown",
+      "ev_realization"
+    ],
+    "note": "模型状态和推荐逻辑以概率校准、ROI、回撤和风险控制为核心。"
+  },
+  "global_models": {
+    "outcome": "outcome_model_v1",
+    "outcome_ensemble": "outcome_ensemble_model_v1",
+    "calibrator": "calibrator_v1",
+    "probability_blend": "probability_blend_v1",
+    "goals_home": "goals_home_model_v1",
+    "goals_away": "goals_away_model_v1",
+    "handicap": "handicap_mapping_model_v1",
+    "worldcup_live_correction": "worldcup_live_correction_v1",
+    "goals_metrics": {
+      "home": {
+        "sample_count": 47392,
+        "train_count": 37913,
+        "valid_count": 9479,
+        "mae": 0.9223412635630068,
+        "mean_poisson_deviance": 1.068743450861676
+      },
+      "away": {
+        "sample_count": 47392,
+        "train_count": 37913,
+        "valid_count": 9479,
+        "mae": 0.8215269486798781,
+        "mean_poisson_deviance": 1.0749514578940977
+      }
+    },
+    "handicap_metrics": {
+      "sample_count": 189568,
+      "train_count": 151654,
+      "valid_count": 37914,
+      "accuracy": 0.6959698264493327,
+      "log_loss": 0.7655290298993918
+    },
+    "worldcup_live_correction_status": {
+      "ready": true,
+      "report": {
+        "ready": true,
+        "metrics": {
+          "sample_count": 384,
+          "train_count": 307,
+          "valid_count": 77,
+          "accuracy": 0.7012987012987013,
+          "log_loss": 0.6448988862367973,
+          "brier_score": 0.22182893035392373,
+          "hit_rate": 0.3333333333333333
+        },
+        "created_at": "2026-06-29T01:52:15Z"
+      }
+    }
+  },
+  "worldcup_model_v2_layers": [
+    {
+      "layer": "1_market_baseline",
+      "status": "implemented",
+      "purpose": "用欧赔/平均赔率/最大赔率隐含概率作为市场基准，并计算水分、离散度和盘口强弱。",
+      "artifacts": [
+        "feature_schema_v1.json",
+        "probability_blend_v1.json"
+      ]
+    },
+    {
+      "layer": "2_team_strength",
+      "status": "implemented_with_proxy",
+      "purpose": "用近期状态、攻防强度、Elo 代理、排名/阵容强度代理生成赛前强弱特征。",
+      "artifacts": [
+        "features.csv",
+        "outcome_ensemble_model_v1.json"
+      ],
+      "limitation": "Football-Data 联赛 CSV 缺少稳定的国家队实时 Elo、FIFA 排名和国家队阵容身价，当前以可获得特征和运行时数据做代理。"
+    },
+    {
+      "layer": "3_lineup_injury_adjustment",
+      "status": "runtime_framework",
+      "purpose": "首发、伤停、xG 缺失时影响推荐等级和比分/总进球风险，不直接伪造训练标签。",
+      "artifacts": [
+        "source_health",
+        "recommendation_service",
+        "strategy_rules_v1.json"
+      ],
+      "limitation": "历史 CSV 不含赛前确认首发和伤停，训练阶段不把首发次数当确认首发。"
+    },
+    {
+      "layer": "4_stage_knockout_context",
+      "status": "implemented_with_defaults",
+      "purpose": "加入杯赛/淘汰赛/中立场/赛程重要性字段，让后端预测能按淘汰赛语境组装特征。",
+      "artifacts": [
+        "feature_schema_v1.json",
+        "model_service.rs"
+      ],
+      "limitation": "联赛历史样本中的淘汰赛字段较少，真实世界杯淘汰赛需要赛后持续复盘校准。"
+    },
+    {
+      "layer": "5_goals_score_model",
+      "status": "implemented",
+      "purpose": "单独训练主客进球 Poisson 模型，输出比分矩阵和总进球概率，不再只从胜平负硬推比分。",
+      "artifacts": [
+        "goals_home_model_v1.json",
+        "goals_away_model_v1.json"
+      ]
+    },
+    {
+      "layer": "6_dynamic_probability_fusion",
+      "status": "implemented",
+      "purpose": "按市场热门程度动态融合模型概率和市场概率，降低模型在强热门/弱热门区间的过拟合。",
+      "artifacts": [
+        "probability_blend_v1.json"
+      ]
+    },
+    {
+      "layer": "7_recommendation_backtest",
+      "status": "implemented",
+      "purpose": "把概率预测和投注推荐拆开，输出盈利策略、禁买/降级规则、ROI和回撤控制。",
+      "artifacts": [
+        "strategy_rules_v1.json",
+        "backtest_summary.json"
+      ]
+    }
+  ],
+  "missing_files": [],
+  "ready": true,
+  "note": "v0.8 增加国家队/淘汰赛上下文字段、动态市场概率融合、命中率策略与盈利策略分离；优先优化概率校准、Log Loss 和市场错误识别。"
+}

@@ -1,0 +1,26 @@
+{
+  "strategy_id": "candidate_strategy_v1",
+  "status": "observation_only",
+  "created_at": "2026-06-29T05:18:32Z",
+  "sample_count": 242,
+  "bet_count": 242,
+  "hit_count": 72,
+  "hit_rate": 0.2975206611570248,
+  "total_paper_stake": 242.0,
+  "total_paper_profit": 4.199999999999999,
+  "paper_roi": 0.017355371900826443,
+  "max_drawdown": 24.700000000000003,
+  "avg_odds": 3.59400826446281,
+  "avg_ev": 0.0065292125067062425,
+  "avg_model_prob": 0.29296085960471097,
+  "warning": "",
+  "candidate_upgrade_check": {
+    "can_consider_upgrade": false,
+    "upgrade_reason": "未达到升级条件",
+    "blocking_reasons": [
+      "纸面交易ROI低于3%"
+    ],
+    "recent_30_roi": 0.06666666666666667
+  },
+  "note": "该策略仅用于模拟观察，不构成正式推荐。"
+}

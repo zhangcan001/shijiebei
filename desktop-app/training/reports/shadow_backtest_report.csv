@@ -1,0 +1,6 @@
+pool_id,decision,label,sample_count,bet_count,hit_count,hit_rate,total_stake,total_profit,roi,max_drawdown,avg_odds,avg_ev,avg_model_prob
+recommend_pool,recommend,正式推荐池,0,0,0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0
+small_stake_pool,small_stake,小注池,0,0,0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0
+observe_only_pool,observe_only,观察池,257,257,75,0.2918287937743191,257.0,-2.3000000000000007,-0.008949416342412454,28.700000000000003,3.5515953307393,0.006512300225415522,0.2963568316502634
+hard_ban_pool,hard_ban,禁买池,28180,28180,9404,0.3337118523775727,28180.0,-2319.78,-0.08232008516678496,2322.890000000004,3.392958836053939,-0.06452495162517902,0.3336705569292365
+wait_pool,wait_for_lineup,等待池,0,0,0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0

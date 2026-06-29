@@ -1,0 +1,7 @@
+{
+  "sample_count": 189568,
+  "train_count": 151654,
+  "valid_count": 37914,
+  "accuracy": 0.6959698264493327,
+  "log_loss": 0.7655290298993918
+}

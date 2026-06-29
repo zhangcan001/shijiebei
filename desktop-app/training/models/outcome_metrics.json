@@ -1,0 +1,7 @@
+{
+  "sample_count": 0,
+  "log_loss": 0.0,
+  "brier_score": 0.0,
+  "accuracy": 0.0,
+  "calibration_bins": []
+}
