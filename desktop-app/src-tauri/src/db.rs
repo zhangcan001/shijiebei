@@ -8,6 +8,69 @@ use tauri::{AppHandle, Manager};
 use crate::models::CacheRecord;
 use crate::services::source_service::ensure_provider_registry;
 
+const PRE_MATCH_SNAPSHOT_COLUMNS: &[(&str, &str)] = &[
+    ("match_id", "text not null default ''"),
+    ("external_fixture_id", "text not null default ''"),
+    ("provider_match_id", "text not null default ''"),
+    ("snapshot_time", "text not null default ''"),
+    ("kickoff_time", "text not null default ''"),
+    ("home_team", "text not null default ''"),
+    ("away_team", "text not null default ''"),
+    ("competition", "text not null default ''"),
+    ("season", "text not null default ''"),
+    ("stage", "text not null default ''"),
+    ("model_version", "text not null default ''"),
+    ("model_probs_json", "text not null default '[]'"),
+    ("calibrated_probs_json", "text not null default '[]'"),
+    ("worldcup_correction_action", "text not null default ''"),
+    ("odds_json", "text not null default '[]'"),
+    ("market_probs_json", "text not null default '[]'"),
+    ("ev_json", "text not null default 'null'"),
+    ("data_quality_score", "real not null default 0"),
+    ("lineup_status", "text not null default 'unknown'"),
+    ("lineup_confidence", "real not null default 0"),
+    ("injury_status", "text not null default 'unknown'"),
+    ("injury_confidence", "real not null default 0"),
+    ("risk_tags_json", "text not null default '[]'"),
+    ("final_decision", "text not null default 'observe_only'"),
+    ("decision_reason_json", "text not null default '[]'"),
+    ("paper_strategy_id", "text not null default ''"),
+    ("paper_trade_enabled", "integer not null default 0"),
+    ("raw_features_json", "text not null default '{}'"),
+    ("created_before_kickoff", "integer not null default 1"),
+    ("is_final_pre_match", "integer not null default 0"),
+    ("created_at", "text not null default ''"),
+    ("updated_at", "text not null default ''"),
+];
+
+pub(crate) fn expected_pre_match_snapshot_columns() -> Vec<&'static str> {
+    let mut columns = vec!["id"];
+    columns.extend(PRE_MATCH_SNAPSHOT_COLUMNS.iter().map(|(name, _)| *name));
+    columns
+}
+
+pub(crate) fn pre_match_snapshot_columns(conn: &Connection) -> anyhow::Result<Vec<String>> {
+    let mut stmt = conn.prepare("pragma table_info(pre_match_snapshots)")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+pub(crate) fn ensure_pre_match_snapshot_schema(conn: &Connection) -> anyhow::Result<Vec<String>> {
+    let existing = pre_match_snapshot_columns(conn)?;
+    let mut added = Vec::new();
+    for (name, definition) in PRE_MATCH_SNAPSHOT_COLUMNS {
+        if existing.iter().any(|column| column == name) {
+            continue;
+        }
+        conn.execute(
+            &format!("alter table pre_match_snapshots add column {name} {definition}"),
+            [],
+        )?;
+        added.push((*name).to_string());
+    }
+    Ok(added)
+}
+
 pub(crate) fn app_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()
@@ -436,6 +499,7 @@ pub(crate) fn open_conn(app: &AppHandle) -> Result<Connection, String> {
     for sql in migrations {
         let _ = conn.execute(sql, []);
     }
+    let _ = ensure_pre_match_snapshot_schema(&conn);
     let _ = ensure_provider_registry(&conn);
     Ok(conn)
 }

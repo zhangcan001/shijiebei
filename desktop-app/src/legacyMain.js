@@ -11,6 +11,7 @@ import {
 import { scorePriorCardHtml as scorePriorCardComponentHtml } from "./components/ScorePriorCard.js";
 import { renderUpsetLabView } from "./views/UpsetLabView.js";
 import { renderSnapshotView } from "./views/SnapshotView.js";
+import { renderSourceView } from "./views/SourceView.js";
 import { handleCleanCoreAction } from "./events.js";
 import { refreshProjectHealth, refreshUpsetLabData } from "./refresh.js";
 import { pct, odds, signedPct, money, ciText, rankedTeam, rankedMatchLabel } from "./utils/format.js";
@@ -2441,37 +2442,7 @@ function viewHtml() {
   }
   return `
     <div class="grid">
-      ${renderSnapshotView(state, { snapshotRows, auditRows, livePaperRows })}
-      ${projectHealthCardHtml(state.projectHealth)}
-      ${modelStatusCard()}
-      ${sourceCards()}
-      ${sourceHealthHtml()}
-      <section class="panel span-12 toolbar">
-        <button class="btn" data-action="create-today-pre-snapshots">批量生成今日快照</button>
-        <button class="btn secondary" data-action="audit-pre-snapshots">运行快照审计</button>
-        <button class="btn secondary" data-action="settle-all-pre-snapshots">赛后批量结算</button>
-        <button class="btn secondary" data-action="export-app-data">导出全部数据</button>
-        <button class="btn secondary" data-action="export-snapshots">导出赛前快照</button>
-        <button class="btn secondary" data-action="export-live-paper">导出纸面交易</button>
-        <button class="btn secondary" data-action="export-audit-logs">导出审计日志</button>
-        <button class="btn ghost" data-action="open-backup-dir">打开备份目录</button>
-        <span class="muted">数据源页集中维护 API、快照审计、备份导出；日常决策请看今日方案。</span>
-      </section>
-      <section class="panel span-12 table-panel">
-        <h3>赛前快照与审计</h3>
-        <div class="scroll-table">
-          <table><thead><tr><th>编号</th><th>开赛</th><th>比赛</th><th>快照时间</th><th>类型</th><th>模型概率</th><th>赔率</th><th>EV</th><th>数据</th><th>伤停</th><th>决策</th><th>操作</th></tr></thead><tbody>${snapshotRows()}</tbody></table>
-        </div>
-      </section>
-      <section class="panel span-12 table-panel">
-        <h3>快照质量审计</h3>
-        <div class="scroll-table"><table><thead><tr><th>比赛</th><th>快照时间</th><th>开赛时间</th><th>审计类型</th><th>严重程度</th><th>问题说明</th><th>状态</th></tr></thead><tbody>${auditRows()}</tbody></table></div>
-      </section>
-      ${externalSourcesHtml()}
-      <section class="panel span-12">
-        <h3>本地数据库</h3>
-        <p class="muted">${state.status?.dbPath || "未初始化"}</p>
-      </section>
+      <section class="span-12">${renderSourceView(state)}</section>
     </div>
   `;
 }

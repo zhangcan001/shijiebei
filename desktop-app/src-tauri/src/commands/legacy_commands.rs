@@ -1,4 +1,7 @@
-use crate::db::{app_dir, cache_get, cache_put, db_path, open_conn};
+use crate::db::{
+    app_dir, cache_get, cache_put, db_path, ensure_pre_match_snapshot_schema,
+    expected_pre_match_snapshot_columns, open_conn, pre_match_snapshot_columns,
+};
 use crate::http_client::{
     http_football_data_org_json, http_json, http_sporttery_browser_json,
     http_sporttery_mobile_json, http_text,
@@ -6814,7 +6817,7 @@ fn kickoff_is_future(kickoff_time: &str, snapshot_time: &str) -> bool {
 }
 
 fn pre_match_snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PreMatchSnapshotRow> {
-    let settlement_text: Option<String> = row.get(34)?;
+    let settlement_text: Option<String> = row.get(33)?;
     Ok(PreMatchSnapshotRow {
         id: row.get(0)?,
         match_id: row.get(1)?,
@@ -6870,6 +6873,22 @@ fn pre_match_snapshot_select_sql(where_clause: &str) -> String {
          from pre_match_snapshots s {} order by s.kickoff_time asc, s.id desc",
         where_clause
     )
+}
+
+fn pre_match_snapshot_export_sql() -> &'static str {
+    "select id, match_id, external_fixture_id, provider_match_id, snapshot_time, kickoff_time,
+            home_team, away_team, competition, season, stage, model_version,
+            model_probs_json, calibrated_probs_json, worldcup_correction_action,
+            odds_json, market_probs_json, ev_json, data_quality_score,
+            lineup_status, lineup_confidence, injury_status, injury_confidence,
+            risk_tags_json, final_decision, decision_reason_json, paper_strategy_id,
+            paper_trade_enabled, raw_features_json, created_before_kickoff,
+            is_final_pre_match, created_at, updated_at
+     from pre_match_snapshots order by kickoff_time asc, id asc"
+}
+
+fn snapshot_mapping_error(error: rusqlite::Error) -> String {
+    format!("快照表字段映射失败：当前查询结果字段数不足，请检查 debug_snapshot_schema。原始错误：{error}")
 }
 
 #[tauri::command]
@@ -7098,7 +7117,7 @@ async fn create_pre_match_snapshot(app: AppHandle, match_id: String) -> Result<V
     let snapshot = conn
         .prepare(&sql)
         .and_then(|mut stmt| stmt.query_row(params![snapshot_id], pre_match_snapshot_from_row))
-        .map_err(|error| error.to_string())?;
+        .map_err(snapshot_mapping_error)?;
     Ok(json!({
         "ok": true,
         "snapshot_id": snapshot_id,
@@ -7158,7 +7177,7 @@ async fn load_pre_match_snapshots(app: AppHandle) -> Result<Vec<PreMatchSnapshot
         .query_map([], pre_match_snapshot_from_row)
         .map_err(|error| error.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())
+        .map_err(snapshot_mapping_error)
 }
 
 #[tauri::command]
@@ -7198,7 +7217,92 @@ async fn get_match_snapshot_history(
         .query_map(params![match_id], pre_match_snapshot_from_row)
         .map_err(|error| error.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())
+        .map_err(snapshot_mapping_error)
+}
+
+#[tauri::command]
+async fn debug_snapshot_schema(app: AppHandle) -> Result<Value, String> {
+    let conn = open_conn(&app)?;
+    let table_exists = conn
+        .query_row(
+            "select count(*) from sqlite_master where type='table' and name='pre_match_snapshots'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+    let before_columns = if table_exists {
+        pre_match_snapshot_columns(&conn).map_err(|error| error.to_string())?
+    } else {
+        Vec::new()
+    };
+    let added_columns =
+        ensure_pre_match_snapshot_schema(&conn).map_err(|error| error.to_string())?;
+    let actual_columns = if table_exists {
+        pre_match_snapshot_columns(&conn).map_err(|error| error.to_string())?
+    } else {
+        Vec::new()
+    };
+    let expected_columns = expected_pre_match_snapshot_columns()
+        .into_iter()
+        .map(|item| item.to_string())
+        .collect::<Vec<_>>();
+    let missing_columns = expected_columns
+        .iter()
+        .filter(|column| !actual_columns.iter().any(|actual| actual == *column))
+        .cloned()
+        .collect::<Vec<_>>();
+    let extra_columns = actual_columns
+        .iter()
+        .filter(|column| !expected_columns.iter().any(|expected| expected == *column))
+        .cloned()
+        .collect::<Vec<_>>();
+    let latest_3_snapshots = if table_exists && missing_columns.is_empty() {
+        let sql = pre_match_snapshot_select_sql("");
+        let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map([], pre_match_snapshot_from_row)
+            .map_err(|error| error.to_string())?;
+        rows.take(3)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(snapshot_mapping_error)?
+            .into_iter()
+            .map(|item| {
+                json!({
+                    "id": item.id,
+                    "match_id": item.match_id,
+                    "snapshot_time": item.snapshot_time,
+                    "kickoff_time": item.kickoff_time,
+                    "home_team": item.home_team,
+                    "away_team": item.away_team,
+                    "created_before_kickoff": item.created_before_kickoff,
+                    "is_final_pre_match": item.is_final_pre_match,
+                    "final_decision": item.final_decision
+                })
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let mut warnings = Vec::new();
+    if !missing_columns.is_empty() {
+        warnings.push("pre_match_snapshots 缺少字段，已尝试自动迁移。".to_string());
+    }
+    if before_columns != actual_columns {
+        warnings.push("本次打开数据库时 schema 已发生变化。".to_string());
+    }
+    Ok(json!({
+        "table_exists": table_exists,
+        "actual_column_count": actual_columns.len(),
+        "actual_columns": actual_columns,
+        "expected_columns": expected_columns,
+        "missing_columns": missing_columns,
+        "extra_columns": extra_columns,
+        "migration_status": if added_columns.is_empty() { "no_change" } else { "columns_added" },
+        "added_columns": added_columns,
+        "latest_3_snapshots": latest_3_snapshots,
+        "warnings": warnings
+    }))
 }
 
 #[tauri::command]
@@ -8066,10 +8170,7 @@ fn live_paper_csv_sql() -> &'static str {
 #[tauri::command]
 async fn export_snapshots(app: AppHandle) -> Result<Value, String> {
     let conn = open_conn(&app)?;
-    let csv = query_to_csv(
-        &conn,
-        "select * from pre_match_snapshots order by kickoff_time asc, id asc",
-    )?;
+    let csv = query_to_csv(&conn, pre_match_snapshot_export_sql())?;
     write_export_csv(&app, "pre_match_snapshots", &csv)
 }
 
@@ -8139,10 +8240,7 @@ async fn export_app_data(app: AppHandle) -> Result<Value, String> {
 
     fs::write(
         staging.join("pre_match_snapshots.csv"),
-        query_to_csv(
-            &conn,
-            "select * from pre_match_snapshots order by kickoff_time asc, id asc",
-        )?,
+        query_to_csv(&conn, pre_match_snapshot_export_sql())?,
     )
     .map_err(|error| error.to_string())?;
     fs::write(
@@ -11630,6 +11728,7 @@ pub fn run_app() {
             create_today_pre_match_snapshots,
             get_pre_match_snapshots,
             get_match_snapshot_history,
+            debug_snapshot_schema,
             mark_final_pre_match_snapshot,
             settle_pre_match_snapshot,
             settle_all_finished_snapshots,
@@ -11785,10 +11884,45 @@ mod tests {
             "settle_pre_match_snapshot",
             "settle_all_finished_snapshots",
             "audit_pre_match_snapshots",
+            "debug_snapshot_schema",
             "debug_snapshot_flow",
         ] {
             assert!(source.contains(command), "{command} should be registered");
         }
+    }
+
+    #[test]
+    fn old_pre_match_snapshot_table_is_migrated_without_deleting_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            create table pre_match_snapshots(
+              id integer primary key autoincrement,
+              match_id text not null,
+              kickoff_time text not null
+            );
+            insert into pre_match_snapshots(match_id, kickoff_time) values('m1','2026-06-30T12:00:00Z');
+            "#,
+        )
+        .unwrap();
+        let added = ensure_pre_match_snapshot_schema(&conn).unwrap();
+        let columns = pre_match_snapshot_columns(&conn).unwrap();
+        assert!(added.iter().any(|item| item == "created_before_kickoff"));
+        assert!(columns.iter().any(|item| item == "model_probs_json"));
+        assert!(columns.iter().any(|item| item == "ev_json"));
+        let count: i64 = conn
+            .query_row("select count(*) from pre_match_snapshots", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn pre_match_snapshot_runtime_sql_does_not_use_select_star() {
+        let source = include_str!("legacy_commands.rs").to_ascii_lowercase();
+        let needle = ["select *", " from pre_match_snapshots"].join("");
+        assert!(!source.contains(&needle));
     }
 
     #[test]
@@ -13564,7 +13698,11 @@ mod tests {
             insert into paper_trading_records values(1,'m1',1,'candidate_strategy_v1','model','H','spf',0.5,2.0,0.0,0.0,80,'[]','keep',1,'pending',null,0,'live_pre_match',1,1,'now',null);
             "#,
         ).unwrap();
-        let snapshot_csv = query_to_csv(&conn, "select * from pre_match_snapshots").unwrap();
+        let snapshot_csv = query_to_csv(
+            &conn,
+            "select id, match_id, kickoff_time from pre_match_snapshots",
+        )
+        .unwrap();
         let live_csv = query_to_csv(&conn, live_paper_csv_sql()).unwrap();
         assert!(snapshot_csv.starts_with("id,match_id,kickoff_time"));
         assert!(live_csv.contains("strategy_id"));

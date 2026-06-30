@@ -89,6 +89,7 @@ textarea {
   padding: 22px;
   height: 100vh;
   overflow-y: auto;
+  box-sizing: border-box;
 }
 
 .topbar {
@@ -281,6 +282,7 @@ th {
 .scroll-table {
   max-height: 620px;
   overflow: auto;
+  max-width: 100%;
   border: 1px solid var(--line);
   border-radius: 8px;
 }
@@ -374,6 +376,86 @@ th {
 
 .muted {
   color: var(--muted);
+}
+
+.content,
+.panel,
+.source-page,
+.source-card,
+td,
+th {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.source-page {
+  max-width: 1480px;
+  margin: 0 auto;
+  display: grid;
+  gap: 14px;
+}
+
+.source-hero {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.source-hero h3,
+.source-card h3 {
+  margin: 0 0 6px;
+}
+
+.source-grid,
+.source-health-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.source-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.source-card-head,
+.source-kv {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.source-kv span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.source-kv strong {
+  text-align: right;
+  min-width: 0;
+}
+
+.source-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.source-actions.grouped {
+  align-items: stretch;
+}
+
+.source-actions .btn,
+.source-actions .mini {
+  flex: 0 1 auto;
 }
 
 .hidden {
