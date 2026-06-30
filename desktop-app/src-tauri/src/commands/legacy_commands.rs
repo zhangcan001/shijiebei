@@ -15,7 +15,7 @@ use crate::services::odds_service::classify_anomaly;
 use crate::services::recommendation_service::{
     action_advice, apply_quality_and_play_rules, play_type_risk_level, quality_action,
 };
-use crate::services::review_guard_service::{review_overfit_guard, score_diversity_guard};
+use crate::services::review_service::{review_overfit_guard, score_diversity_guard};
 use crate::services::score_prior_service::{
     apply_score_prior_adjustment, get_score_prior_rankings, load_worldcup_knockout_score_priors,
     score_prior_bonus, score_prior_summary,
@@ -9656,6 +9656,18 @@ fn light_scan_scores_for(
     let high_goal_script_score =
         (total_4plus * 90.0 + total_5plus * 65.0 + btts * 30.0).clamp(0.0, 100.0);
     let draw_script_score = (draw * 120.0 + btts * 45.0).clamp(0.0, 100.0);
+    let score_diversity = if matches!(play_pool, "high_odds_score_pool" | "score_3_3_pool") {
+        score_diversity_guard(
+            &[
+                json!({"score": selection, "adjusted_probability": light_scan_model_prob_for_selection(match_row, "CRS 比分", selection)}),
+                json!({"score": "2:1", "adjusted_probability": light_scan_model_prob_for_selection(match_row, "CRS 比分", "2:1")}),
+                json!({"score": "1:0", "adjusted_probability": light_scan_model_prob_for_selection(match_row, "CRS 比分", "1:0")}),
+            ],
+            draw,
+        )
+    } else {
+        json!({})
+    };
     let chaos_score = match play_pool {
         "extreme_total_goals_pool" => high_goal_script_score.max(low_goal_script_score),
         "high_odds_score_pool" | "score_3_3_pool" => {
@@ -9726,6 +9738,7 @@ fn light_scan_scores_for(
             "low_goal_script_score": low_goal_script_score,
             "high_goal_script_score": high_goal_script_score,
             "draw_script_score": draw_script_score,
+            "score_diversity_guard": score_diversity.clone(),
             "favorite_team": favorite_team,
             "underdog_team": underdog_team,
             "model_prob_available": true,
@@ -9739,7 +9752,7 @@ fn light_scan_scores_for(
         "当前仅用于判断冷门可能性，不建议下注"
     ]);
     let risk = json!({
-        "risk_text": "no_odds_scan；confidence=low；缺少赔率/市场概率/EV",
+        "risk_text": format!("no_odds_scan；confidence=low；缺少赔率/市场概率/EV；{}", score_diversity.get("warning").and_then(Value::as_str).unwrap_or("")),
         "missing_fields": ["odds", "market_prob", "ev", "pre_match_snapshot"],
         "source": "light_scan"
     });
