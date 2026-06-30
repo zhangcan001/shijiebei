@@ -74,8 +74,25 @@ pub fn project_health_report() -> Value {
         }
     };
     let docs_arch = desktop.join("docs").join("ARCHITECTURE.md");
+    let upset_lab_view = desktop.join("src").join("views").join("UpsetLabView.js");
+    let upset_lab_service = desktop
+        .join("src-tauri")
+        .join("src")
+        .join("services")
+        .join("upset_lab_service.rs");
+    let review_guard_service = desktop
+        .join("src-tauri")
+        .join("src")
+        .join("services")
+        .join("review_guard_service.rs");
+    let legacy_commands = desktop
+        .join("src-tauri")
+        .join("src")
+        .join("commands")
+        .join("legacy_commands.rs");
     let main_js_size = count_lines(&main_js);
     let commands_rs_size = count_lines(&commands_rs);
+    let legacy_commands_lines = count_lines(&legacy_commands);
     let commands_text = read_rs_tree(&desktop.join("src-tauri").join("src").join("commands"));
     let command_count = commands_text.matches("#[tauri::command]").count() as i64;
     let test_count = commands_text.matches("#[test]").count() as i64;
@@ -85,25 +102,42 @@ pub fn project_health_report() -> Value {
         fs::read_to_string(desktop.join("src-tauri").join("src").join("db.rs")).unwrap_or_default();
     let table_count = db_text.matches("create table if not exists").count() as i64;
     let mut risk_flags = Vec::new();
-    if main_js_size > 800 {
-        risk_flags.push("giant_frontend_file");
+    if main_js_size > 300 {
+        risk_flags.push("giant_main_js");
     }
-    if commands_rs_size > 2000 {
-        risk_flags.push("giant_commands_file");
+    if commands_rs_size > 300 {
+        risk_flags.push("giant_commands_mod");
     }
     if !docs_arch.exists() {
         risk_flags.push("missing_architecture_doc");
     }
+    if !upset_lab_service.exists() {
+        risk_flags.push("missing_upset_lab_service");
+    }
     if commands_text.contains("upset_lab_candidates") && commands_text.contains("today_bet_plan") {
         risk_flags.push("upset_lab_not_fully_extracted");
     }
+    if !commands_text.contains("score_diversity_guard") {
+        risk_flags.push("score_prior_may_overfit");
+    }
+    if !commands_text.contains("review_overfit_guard") {
+        risk_flags.push("review_can_auto_change_rules");
+    }
     risk_flags.push("snapshot_flow_needs_facade_split");
-    if main_js_size > 0 && commands_rs_size > 0 {
+    if legacy_commands_lines > 2000 {
         risk_flags.push("clean_core_refactor_in_progress");
     }
     json!({
         "main_js_size": main_js_size,
+        "main_js_lines": main_js_size,
         "commands_rs_size": commands_rs_size,
+        "commands_mod_lines": commands_rs_size,
+        "legacy_commands_lines": legacy_commands_lines,
+        "has_architecture_doc": docs_arch.exists(),
+        "has_upset_lab_view": upset_lab_view.exists(),
+        "has_upset_lab_service": upset_lab_service.exists(),
+        "has_review_guard_service": review_guard_service.exists(),
+        "clean_core_version": "v0.2-clean-core",
         "command_count": command_count,
         "service_count": count_files_with_ext(&services_dir, "rs"),
         "view_count": count_files_with_ext(&views_dir, "js"),

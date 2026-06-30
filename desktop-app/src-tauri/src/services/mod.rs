@@ -11,3 +11,4 @@ pub mod score_prior_service;
 pub mod simulation_service;
 pub mod source_service;
 pub mod system_service;
+pub mod upset_lab_service;
