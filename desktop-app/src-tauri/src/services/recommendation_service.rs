@@ -12,17 +12,6 @@ pub(crate) fn quality_action(score: f64) -> &'static str {
     }
 }
 
-pub(crate) fn lineup_status_rank(status: &str) -> i32 {
-    match status {
-        "official" => 5,
-        "confirmed" => 4,
-        "reported" => 3,
-        "probable" => 2,
-        "predicted" => 1,
-        _ => 0,
-    }
-}
-
 pub(crate) fn play_type_risk_level(market: &str) -> &'static str {
     if market.starts_with("CRS") {
         "极高"
@@ -50,34 +39,23 @@ pub(crate) fn apply_quality_and_play_rules(
         *confidence = "低".to_string();
         *stake = 0.0;
         reasons.push("数据质量建议：建议跳过".to_string());
-    } else if data_score < 65.0 {
+    } else if data_score < 60.0 {
         if decision == "可买" {
             *decision = "观察".to_string();
         }
         *stake = stake.min(0.0015);
         reasons.push("数据质量建议：只看预测，不建议购买".to_string());
-    } else if data_score < 75.0 {
-        if decision == "可买" {
-            *decision = "观察".to_string();
-        }
-        *stake = stake.min(0.0025);
-        reasons.push("数据质量建议：观察或极小注".to_string());
+    } else if data_score < 72.0 {
+        *stake = stake.min(0.004);
+        reasons.push("淘汰赛模式：数据质量中等，允许小注候选但不重仓".to_string());
     } else if data_score < 85.0 {
-        *stake = stake.min(0.005);
-        reasons.push("数据质量建议：可小注".to_string());
+        *stake = stake.min(0.008);
+        reasons.push("淘汰赛模式：数据质量可用，可主动小注".to_string());
     } else {
         reasons.push("数据质量建议：可进入正式推荐".to_string());
     }
 
-    if lineup_confidence < 80.0 || lineup_status_rank(lineup_status) < lineup_status_rank("confirmed") {
-        if decision == "可买" && *stake > 0.005 {
-            *stake = 0.005;
-        }
-        if confidence == "高" {
-            *confidence = "中".to_string();
-        }
-        reasons.push("首发未确认：推荐等级最高到小注/观察".to_string());
-    }
+    let _ = (lineup_status, lineup_confidence);
 
     if market.starts_with("CRS") {
         if decision == "可买" {
@@ -99,7 +77,7 @@ pub(crate) fn action_advice(decision: &str, tier: &str, stake: f64, market: &str
     if decision == "禁止" || stake <= 0.0 {
         "建议跳过".to_string()
     } else if decision == "观察" {
-        "只看预测，等首发/赔率确认".to_string()
+        "观察候选，等赔率确认".to_string()
     } else if market.starts_with("CRS") {
         "比分默认不下注，可做极小观察".to_string()
     } else if tier == "稳胆" || tier == "让球稳胆" {

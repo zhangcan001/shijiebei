@@ -75,7 +75,7 @@ def main():
     x_valid = scaler.transform(valid_df[FEATURES].astype(float).values)
     y_train = train_df["label"].astype(str).values
     y_valid = valid_df["label"].astype(str).values
-    model = LogisticRegression(solver="lbfgs", max_iter=1000, class_weight="balanced")
+    model = LogisticRegression(solver="lbfgs", max_iter=1000)
     model.fit(x_train, y_train)
     probs = model.predict_proba(x_valid)
     preds = model.predict(x_valid)

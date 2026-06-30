@@ -9,7 +9,18 @@
   "goals_home_model_path": "goals_home_model_v1.json",
   "goals_away_model_path": "goals_away_model_v1.json",
   "handicap_model_path": "handicap_mapping_model_v1.json",
-  "created_at": "2026-06-29T05:18:32Z",
+  "score_prior_model": {
+    "version": "worldcup_knockout_score_priors_v1",
+    "path": "worldcup_knockout_score_priors_v1.json",
+    "sample_count": 32,
+    "source_tournaments": [
+      2018,
+      2022
+    ],
+    "created_at": "2026-06-30T07:17:44Z",
+    "scope": "FIFA World Cup knockout stage, 90 minutes only"
+  },
+  "created_at": "2026-06-30T07:17:44Z",
   "training_data_range": {
     "start": "2019-07-26",
     "end": "2026-05-31",
@@ -379,6 +390,7 @@
     "goals_away": "goals_away_model_v1",
     "handicap": "handicap_mapping_model_v1",
     "worldcup_live_correction": "worldcup_live_correction_v1",
+    "score_prior": "worldcup_knockout_score_priors_v1",
     "goals_metrics": {
       "home": {
         "sample_count": 47392,

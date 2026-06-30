@@ -58,5 +58,9 @@ pub(crate) fn max_drawdown_from_profit(items: &[f64]) -> f64 {
 }
 
 pub(crate) fn roi_from_profit(profit_sum: f64, stake_sum: f64) -> f64 {
-    if stake_sum > 0.0 { profit_sum / stake_sum } else { 0.0 }
+    if stake_sum > 0.0 {
+        profit_sum / stake_sum
+    } else {
+        0.0
+    }
 }

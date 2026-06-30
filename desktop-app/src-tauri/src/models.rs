@@ -29,7 +29,7 @@ pub(crate) struct SourceStatus {
     pub(crate) next_action: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct MatchRow {
     pub(crate) id: String,
     pub(crate) match_num: String,
@@ -278,6 +278,7 @@ pub(crate) struct MatchAnalysis {
     pub(crate) knockout_note: String,
     pub(crate) had: Vec<ProbItem>,
     pub(crate) hhad: Vec<ProbItem>,
+    pub(crate) hhad_line: String,
     pub(crate) ttg: Vec<ProbItem>,
     pub(crate) scores: Vec<ProbItem>,
     pub(crate) europe_note: String,
@@ -371,7 +372,7 @@ pub(crate) struct TodayBetPlan {
     pub(crate) review_hint: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct PreMatchSnapshotRow {
     pub(crate) id: i64,
     pub(crate) match_id: String,

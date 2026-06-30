@@ -31,13 +31,24 @@ pub(crate) fn final_field_confidence(
     completeness_score: f64,
     source_agreement_score: f64,
 ) -> f64 {
-    (base_confidence * (freshness_score / 100.0) * (completeness_score / 100.0) * source_agreement_score)
+    (base_confidence
+        * (freshness_score / 100.0)
+        * (completeness_score / 100.0)
+        * source_agreement_score)
         .clamp(0.0, 100.0)
 }
 
-pub(crate) fn fuse_provider_records(records: &[ProviderRawRecord], base_confidence: f64, freshness_score: f64, completeness_score: f64) -> Option<FusionResult> {
+pub(crate) fn fuse_provider_records(
+    records: &[ProviderRawRecord],
+    base_confidence: f64,
+    freshness_score: f64,
+    completeness_score: f64,
+) -> Option<FusionResult> {
     let first = records.first()?;
-    let values = records.iter().map(|record| record.field_value.clone()).collect::<Vec<_>>();
+    let values = records
+        .iter()
+        .map(|record| record.field_value.clone())
+        .collect::<Vec<_>>();
     let (agreement, conflict) = source_agreement_score(&values);
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for value in &values {
@@ -54,13 +65,22 @@ pub(crate) fn fuse_provider_records(records: &[ProviderRawRecord], base_confiden
         team: first.team.clone(),
         field_name: first.field_name.clone(),
         final_value,
-        confidence: final_field_confidence(base_confidence, freshness_score, completeness_score, agreement),
+        confidence: final_field_confidence(
+            base_confidence,
+            freshness_score,
+            completeness_score,
+            agreement,
+        ),
         provider_count: records.len() as i64,
         conflict,
     })
 }
 
-pub(crate) fn lineup_status_from_source(source_status: &str, start_rate: f64, confirmed: bool) -> (&'static str, f64) {
+pub(crate) fn lineup_status_from_source(
+    source_status: &str,
+    start_rate: f64,
+    confirmed: bool,
+) -> (&'static str, f64) {
     if confirmed {
         return ("api_confirmed", 85.0);
     }
@@ -74,7 +94,12 @@ pub(crate) fn lineup_status_from_source(source_status: &str, start_rate: f64, co
     }
 }
 
-pub(crate) fn downgrade_for_missing_realtime_xg(market: &str, decision: &mut String, confidence: &mut String, reason: &mut Vec<String>) {
+pub(crate) fn downgrade_for_missing_realtime_xg(
+    market: &str,
+    decision: &mut String,
+    confidence: &mut String,
+    reason: &mut Vec<String>,
+) {
     if market.starts_with("CRS") || market.starts_with("TTG") {
         if decision == "可买" {
             *decision = "观察".to_string();

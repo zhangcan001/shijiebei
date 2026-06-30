@@ -1,5 +1,10 @@
 #[allow(dead_code)]
-pub(crate) fn provider_field_confidence(base: f64, freshness: f64, completeness: f64, consistency: f64) -> f64 {
+pub(crate) fn provider_field_confidence(
+    base: f64,
+    freshness: f64,
+    completeness: f64,
+    consistency: f64,
+) -> f64 {
     (base * freshness * completeness * consistency).clamp(0.0, 100.0)
 }
 
@@ -24,21 +29,51 @@ pub(crate) fn cache_freshness_score(updated_at: &str) -> f64 {
 pub(crate) fn source_completeness_score(key: &str, count: usize) -> f64 {
     let expected = match key {
         "sporttery" => 6.0,
-        "europe_odds" => 8.0,
+        "europe_odds" => {
+            return if count > 0 { 100.0 } else { 70.0 };
+        }
         "statsbomb_xg" | "stats_data" => 16.0,
         "match_results" | "historical_results" => 16.0,
-        "injury_data" | "player_status_data" | "lineup_data" => 1.0,
+        "injury_data" => 1.0,
+        "player_status_data" | "lineup_data" => {
+            return if count > 0 { 100.0 } else { 70.0 };
+        }
         _ => 1.0,
     };
     ((count as f64 / expected).min(1.0) * 100.0).clamp(0.0, 100.0)
 }
 
-pub(crate) fn source_health_label(ok: bool, freshness: f64, completeness: f64, using_stale_cache: bool) -> String {
+pub(crate) fn source_is_optional(key: &str) -> bool {
+    matches!(
+        key,
+        "europe_odds" | "player_status_data" | "lineup_data" | "stats_data"
+    )
+}
+
+pub(crate) fn source_health_label_for(
+    key: &str,
+    ok: bool,
+    freshness: f64,
+    completeness: f64,
+    using_stale_cache: bool,
+) -> String {
+    if source_is_optional(key) && !ok {
+        return "可选未接入".to_string();
+    }
+    source_health_label(ok, freshness, completeness, using_stale_cache)
+}
+
+pub(crate) fn source_health_label(
+    ok: bool,
+    freshness: f64,
+    completeness: f64,
+    using_stale_cache: bool,
+) -> String {
     if !ok {
         return "字段缺失".to_string();
     }
     if using_stale_cache {
-        return "失败但使用旧缓存".to_string();
+        return "过期".to_string();
     }
     if completeness < 35.0 {
         return "字段缺失".to_string();
@@ -50,6 +85,30 @@ pub(crate) fn source_health_label(ok: bool, freshness: f64, completeness: f64, u
 }
 
 pub(crate) fn ensure_provider_registry(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute(
+        "delete from data_providers where provider_id='api_football'",
+        [],
+    )?;
+    conn.execute(
+        "delete from provider_credentials where provider_id='api_football'",
+        [],
+    )?;
+    conn.execute(
+        "delete from source_health where provider_id='api_football'",
+        [],
+    )?;
+    conn.execute(
+        "delete from data_providers where provider_id='odds_api_io'",
+        [],
+    )?;
+    conn.execute(
+        "delete from provider_credentials where provider_id='odds_api_io'",
+        [],
+    )?;
+    conn.execute(
+        "delete from source_health where provider_id='odds_api_io'",
+        [],
+    )?;
     for provider in default_provider_registry() {
         conn.execute(
             "insert into data_providers(provider_id, name, data_type, requires_key, base_confidence, enabled, daily_limit, hourly_limit, supported_data_types)
@@ -77,7 +136,10 @@ pub(crate) fn ensure_provider_registry(conn: &Connection) -> anyhow::Result<()> 
     Ok(())
 }
 
-pub(crate) fn provider_api_key(conn: &Connection, provider_id: &str) -> anyhow::Result<Option<String>> {
+pub(crate) fn provider_api_key(
+    conn: &Connection,
+    provider_id: &str,
+) -> anyhow::Result<Option<String>> {
     conn.query_row(
         "select api_key from provider_credentials where provider_id=?1",
         params![provider_id],
@@ -87,7 +149,11 @@ pub(crate) fn provider_api_key(conn: &Connection, provider_id: &str) -> anyhow::
     .map_err(Into::into)
 }
 
-pub(crate) fn save_provider_api_key(conn: &Connection, provider_id: &str, api_key: &str) -> anyhow::Result<()> {
+pub(crate) fn save_provider_api_key(
+    conn: &Connection,
+    provider_id: &str,
+    api_key: &str,
+) -> anyhow::Result<()> {
     conn.execute(
         "insert into provider_credentials(provider_id, api_key, updated_at) values(?1, ?2, ?3)
          on conflict(provider_id) do update set api_key=excluded.api_key, updated_at=excluded.updated_at",
@@ -97,11 +163,20 @@ pub(crate) fn save_provider_api_key(conn: &Connection, provider_id: &str, api_ke
 }
 
 pub(crate) fn clear_provider_api_key(conn: &Connection, provider_id: &str) -> anyhow::Result<()> {
-    conn.execute("delete from provider_credentials where provider_id=?1", params![provider_id])?;
+    conn.execute(
+        "delete from provider_credentials where provider_id=?1",
+        params![provider_id],
+    )?;
     Ok(())
 }
 
-pub(crate) fn log_provider_request(conn: &Connection, provider_id: &str, data_type: &str, success: bool, error_message: &str) -> anyhow::Result<()> {
+pub(crate) fn log_provider_request(
+    conn: &Connection,
+    provider_id: &str,
+    data_type: &str,
+    success: bool,
+    error_message: &str,
+) -> anyhow::Result<()> {
     conn.execute(
         "insert into provider_request_logs(provider_id, data_type, requested_at, success, error_message) values(?1, ?2, ?3, ?4, ?5)",
         params![provider_id, data_type, Utc::now().to_rfc3339(), if success { 1 } else { 0 }, error_message],
@@ -118,9 +193,15 @@ pub(crate) fn provider_request_count(conn: &Connection, provider_id: &str, hours
     .unwrap_or(0)
 }
 
-pub(crate) fn request_limit_available(conn: &Connection, provider_id: &str, daily_limit: i64, hourly_limit: i64) -> bool {
+pub(crate) fn request_limit_available(
+    conn: &Connection,
+    provider_id: &str,
+    daily_limit: i64,
+    hourly_limit: i64,
+) -> bool {
     let daily_ok = daily_limit <= 0 || provider_request_count(conn, provider_id, 24) < daily_limit;
-    let hourly_ok = hourly_limit <= 0 || provider_request_count(conn, provider_id, 1) < hourly_limit;
+    let hourly_ok =
+        hourly_limit <= 0 || provider_request_count(conn, provider_id, 1) < hourly_limit;
     daily_ok && hourly_ok
 }
 
@@ -134,7 +215,10 @@ pub(crate) fn provider_key_error(requires_key: bool, key_configured: bool) -> Op
 }
 
 #[allow(dead_code)]
-pub(crate) fn save_provider_raw_record(conn: &Connection, record: &ProviderRawRecord) -> anyhow::Result<()> {
+pub(crate) fn save_provider_raw_record(
+    conn: &Connection,
+    record: &ProviderRawRecord,
+) -> anyhow::Result<()> {
     conn.execute(
         "insert into provider_raw_data(provider_id, provider, data_type, match_id, team, field_name, field_value, fetched_at, confidence, raw_payload)
          values(?1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -178,7 +262,8 @@ pub(crate) fn list_data_providers(conn: &Connection) -> anyhow::Result<Vec<DataP
         let enabled_int: i64 = row.get(5)?;
         let key_int: i64 = row.get(16)?;
         let supported: String = row.get(15)?;
-        let health_label = source_health_label(confidence > 0.0, freshness, completeness, stale_int != 0);
+        let health_label =
+            source_health_label(confidence > 0.0, freshness, completeness, stale_int != 0);
         Ok(DataProvider {
             provider_id: row.get(0)?,
             name: row.get(1)?,
@@ -195,7 +280,11 @@ pub(crate) fn list_data_providers(conn: &Connection) -> anyhow::Result<Vec<DataP
             completeness_score: completeness,
             confidence_score: confidence,
             using_stale_cache: stale_int != 0,
-            supported_data_types: supported.split(',').filter(|item| !item.is_empty()).map(str::to_string).collect(),
+            supported_data_types: supported
+                .split(',')
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+                .collect(),
             key_configured: key_int != 0,
             today_requests: row.get(17)?,
             hour_requests: row.get(18)?,

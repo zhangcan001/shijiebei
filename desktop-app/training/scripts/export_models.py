@@ -28,6 +28,7 @@ def main():
     away_goals = read_json(REQUIRED["goals_away_model"], {})
     handicap = read_json(REQUIRED["handicap_model"], {})
     worldcup_correction = read_json(MODELS_DIR / "worldcup_live_correction_v1.json", {})
+    score_prior = read_json(MODELS_DIR / "worldcup_knockout_score_priors_v1.json", {})
     worldcup_correction_report = read_json(REPORTS_DIR / "worldcup_live_correction_report.json", {})
     backtest = read_json(REQUIRED["backtest_summary"], {})
     paper_trading = read_json(REPORTS_DIR / "paper_trading_backtest_summary.json", {})
@@ -101,6 +102,14 @@ def main():
         "goals_home_model_path": "goals_home_model_v1.json",
         "goals_away_model_path": "goals_away_model_v1.json",
         "handicap_model_path": "handicap_mapping_model_v1.json",
+        "score_prior_model": {
+            "version": score_prior.get("model_version", "worldcup_knockout_score_priors_v1"),
+            "path": "worldcup_knockout_score_priors_v1.json",
+            "sample_count": score_prior.get("sample_count", 0),
+            "source_tournaments": score_prior.get("tournaments", [2018, 2022]),
+            "created_at": now_iso(),
+            "scope": score_prior.get("scope", "FIFA World Cup knockout stage, 90 minutes only"),
+        },
         "created_at": now_iso(),
         "training_data_range": outcome.get("training_data_range", schema.get("date_range", {})),
         "metrics_summary": final_metrics,
@@ -121,6 +130,7 @@ def main():
             "goals_away": away_goals.get("model_version"),
             "handicap": handicap.get("model_version"),
             "worldcup_live_correction": worldcup_correction.get("model_version"),
+            "score_prior": score_prior.get("model_version"),
             "goals_metrics": {
                 "home": home_goals.get("metrics", {}),
                 "away": away_goals.get("metrics", {}),

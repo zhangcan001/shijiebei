@@ -35,7 +35,9 @@ pub(crate) async fn http_sporttery_mobile_json(url: &str) -> anyhow::Result<Valu
 
 pub(crate) async fn http_sporttery_browser_json(url: &str) -> anyhow::Result<Value> {
     let client = reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36")
+        .user_agent(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36",
+        )
         .timeout(std::time::Duration::from_secs(35))
         .build()?;
     let response = client
@@ -64,7 +66,11 @@ pub(crate) async fn http_text(url: &str) -> anyhow::Result<String> {
     Ok(response.text().await?)
 }
 
-pub(crate) async fn http_json_with_header(url: &str, header_name: &str, header_value: &str) -> anyhow::Result<Value> {
+pub(crate) async fn http_json_with_header(
+    url: &str,
+    header_name: &str,
+    header_value: &str,
+) -> anyhow::Result<Value> {
     let client = reqwest::Client::builder()
         .user_agent("worldcup-odds-desktop/0.1")
         .timeout(std::time::Duration::from_secs(35))
@@ -84,8 +90,4 @@ pub(crate) async fn http_json_with_header(url: &str, header_name: &str, header_v
 
 pub(crate) async fn http_football_data_org_json(url: &str, token: &str) -> anyhow::Result<Value> {
     http_json_with_header(url, "X-Auth-Token", token).await
-}
-
-pub(crate) async fn http_api_football_json(url: &str, token: &str) -> anyhow::Result<Value> {
-    http_json_with_header(url, "x-apisports-key", token).await
 }

@@ -21,6 +21,7 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
+  overflow: hidden;
 }
 
 button,
@@ -31,9 +32,10 @@ textarea {
 }
 
 .app {
-  min-height: 100vh;
+  height: 100vh;
   display: grid;
   grid-template-columns: 248px 1fr;
+  overflow: hidden;
 }
 
 .sidebar {
@@ -43,6 +45,10 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 18px;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
 }
 
 .brand h1 {
@@ -81,6 +87,8 @@ textarea {
 .content {
   min-width: 0;
   padding: 22px;
+  height: 100vh;
+  overflow-y: auto;
 }
 
 .topbar {
@@ -99,6 +107,23 @@ textarea {
 .topbar p {
   margin: 5px 0 0;
   color: var(--muted);
+}
+
+.refresh-strip {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin: -6px 0 16px;
+}
+
+.refresh-strip span {
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 5px 9px;
+  font-size: 12px;
 }
 
 .actions {
@@ -282,6 +307,27 @@ th {
   background: #fffaf0;
 }
 
+.prediction-hit td {
+  background: #edf9f1;
+}
+
+.prediction-miss td {
+  background: #fff0f0;
+}
+
+.prediction-hit td:first-child,
+.prediction-miss td:first-child {
+  border-left: 4px solid transparent;
+}
+
+.prediction-hit td:first-child {
+  border-left-color: var(--green);
+}
+
+.prediction-miss td:first-child {
+  border-left-color: var(--red);
+}
+
 .reason {
   max-width: 360px;
   margin-top: 5px;
@@ -373,6 +419,10 @@ th {
   gap: 12px;
   align-items: center;
   margin-bottom: 10px;
+}
+
+.progress-panel {
+  margin-bottom: 14px;
 }
 
 progress {

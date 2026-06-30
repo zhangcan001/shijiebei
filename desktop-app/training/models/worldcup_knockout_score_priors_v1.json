@@ -1,0 +1,122 @@
+{
+  "model_version": "worldcup_knockout_score_priors_v1",
+  "scope": "FIFA World Cup knockout stage, 90 minutes only",
+  "tournaments": [
+    2018,
+    2022
+  ],
+  "sample_count": 32,
+  "notes": [
+    "Only 90-minute regulation scores are included.",
+    "Extra time and penalty shootout scores are excluded.",
+    "This prior is used for score reference, total goals tendency, upset lab scripts, and confidence adjustment only.",
+    "It must not override hard_ban or formal recommendation rules."
+  ],
+  "score_shape_priors": {
+    "1-1": 0.1875,
+    "2-1_type": 0.15625,
+    "2-0_type": 0.15625,
+    "1-0_type": 0.09375,
+    "0-0": 0.0625,
+    "2-2": 0.0625,
+    "3-1_type": 0.0625,
+    "3-0_type": 0.0625,
+    "4-1_type": 0.03125,
+    "6-1_type": 0.03125,
+    "4-3_type": 0.03125,
+    "3-2_type": 0.03125,
+    "4-2_type": 0.03125,
+    "3-3": 0.0
+  },
+  "score_shape_counts": {
+    "1-1": 6,
+    "2-1_type": 5,
+    "2-0_type": 5,
+    "1-0_type": 3,
+    "0-0": 2,
+    "2-2": 2,
+    "3-1_type": 2,
+    "3-0_type": 2,
+    "4-1_type": 1,
+    "6-1_type": 1,
+    "4-3_type": 1,
+    "3-2_type": 1,
+    "4-2_type": 1,
+    "3-3": 0
+  },
+  "total_goals_priors": {
+    "0_goals": 0.0625,
+    "1_goal": 0.09375,
+    "2_goals": 0.34375,
+    "3_goals": 0.21875,
+    "4_goals": 0.125,
+    "5_goals": 0.0625,
+    "6_goals": 0.03125,
+    "7_goals": 0.0625,
+    "under_2_5": 0.5,
+    "over_2_5": 0.5,
+    "one_to_two_goals": 0.4375,
+    "three_to_four_goals": 0.34375,
+    "five_plus_goals": 0.15625
+  },
+  "total_goals_counts": {
+    "0_goals": 2,
+    "1_goal": 3,
+    "2_goals": 11,
+    "3_goals": 7,
+    "4_goals": 4,
+    "5_goals": 2,
+    "6_goals": 1,
+    "7_goals": 2,
+    "under_2_5": 16,
+    "over_2_5": 16,
+    "one_to_two_goals": 14,
+    "three_to_four_goals": 11,
+    "five_plus_goals": 5
+  },
+  "draw_priors": {
+    "draw_90min": 0.3125,
+    "0-0": 0.0625,
+    "1-1": 0.1875,
+    "2-2": 0.0625,
+    "3-3": 0.0
+  },
+  "draw_counts": {
+    "draw_90min": 10,
+    "0-0": 2,
+    "1-1": 6,
+    "2-2": 2,
+    "3-3": 0
+  },
+  "recommendation_notes": {
+    "highest_score_shape": "1-1",
+    "strong_score_shapes": [
+      "1-1",
+      "2-1_type",
+      "2-0_type",
+      "1-0_type"
+    ],
+    "cold_draw_scores": [
+      "1-1",
+      "0-0",
+      "2-2"
+    ],
+    "favorite_narrow_win_scores": [
+      "1-0_type",
+      "2-0_type",
+      "2-1_type"
+    ],
+    "main_total_goals_zones": [
+      "2_goals",
+      "3_goals",
+      "4_goals"
+    ],
+    "extreme_scores": [
+      "3-3",
+      "4-3_type",
+      "4-2_type",
+      "6-1_type"
+    ],
+    "score_3_3_policy": "Extreme low-frequency score. It appeared 0 times in 2018+2022 knockout-stage 90-minute samples. Keep as paper-only or tiny entertainment stake."
+  }
+}

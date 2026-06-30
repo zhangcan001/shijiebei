@@ -194,6 +194,59 @@ pub(crate) fn open_conn(app: &AppHandle) -> Result<Connection, String> {
           created_at text not null,
           settled_at text
         );
+        create table if not exists upset_lab_candidates (
+          id integer primary key autoincrement,
+          match_id text not null,
+          snapshot_id integer,
+          source_snapshot_type text not null,
+          match_time text not null,
+          home_team text not null,
+          away_team text not null,
+          competition text not null default '',
+          stage text not null default '',
+          play_pool text not null,
+          play_type text not null,
+          selection text not null,
+          odds real,
+          model_prob real not null,
+          market_prob real,
+          fair_odds real,
+          ev real,
+          advantage_rate real,
+          data_quality_score real not null default 0,
+          scan_score real not null default 0,
+          upset_score real not null,
+          chaos_score real not null,
+          risk_level text not null,
+          stake_pct real not null,
+          stake_advice text not null,
+          final_lab_decision text not null,
+          trigger_reasons_json text not null,
+          block_reasons_json text not null,
+          risk_tags_json text not null,
+          is_paper_only integer not null default 1,
+          paper_record_id integer,
+          created_at text not null,
+          updated_at text not null
+        );
+        create index if not exists idx_upset_lab_candidates_match
+          on upset_lab_candidates(match_id, snapshot_id, play_pool, final_lab_decision);
+        create table if not exists upset_lab_backtest_results (
+          id integer primary key autoincrement,
+          candidate_id integer,
+          match_id text not null,
+          play_pool text not null,
+          play_type text not null,
+          selection text not null,
+          odds real not null,
+          model_prob real not null,
+          ev real not null,
+          stake real not null,
+          is_hit integer not null,
+          profit real not null,
+          roi real not null,
+          settled_at text not null
+        );
         create table if not exists pre_match_snapshots (
           id integer primary key autoincrement,
           match_id text not null,
@@ -371,6 +424,12 @@ pub(crate) fn open_conn(app: &AppHandle) -> Result<Connection, String> {
         "alter table paper_trading_records add column source text not null default 'historical_backtest'",
         "alter table paper_trading_records add column created_before_kickoff integer not null default 0",
         "alter table paper_trading_records add column is_final_snapshot integer not null default 0",
+        "alter table paper_trading_records add column upset_lab_candidate_id integer",
+        "alter table paper_trading_records add column play_pool text not null default ''",
+        "alter table paper_trading_records add column risk_level text not null default ''",
+        "alter table paper_trading_records add column is_real_bet integer not null default 0",
+        "alter table upset_lab_candidates add column data_quality_score real not null default 0",
+        "alter table upset_lab_candidates add column scan_score real not null default 0",
     ];
     for sql in migrations {
         let _ = conn.execute(sql, []);

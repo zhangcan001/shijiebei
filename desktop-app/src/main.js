@@ -5,19 +5,17 @@ import "./styles.css";
 import { state } from "./state.js";
 import { pct, odds, signedPct, money, ciText, rankedTeam, rankedMatchLabel } from "./utils/format.js";
 const views = [
-  ["dashboard", "比赛中心"],
+  ["today", "今日方案"],
   ["prediction", "预测中心"],
   ["match", "单场分析"],
   ["sim", "模拟对决"],
-  ["today", "今日方案"],
-  ["snapshots", "赛前快照"],
-  ["recommend", "买球推荐"],
   ["movements", "赔率异动"],
+  ["upset", "冷门实验室"],
   ["results", "赛果中心"],
   ["review", "复盘中心"],
-  ["bankroll", "资金管理"],
   ["sources", "数据源"]
 ];
+let renderedView = null;
 
 function setBusy(message) {
   state.busy = true;
@@ -41,6 +39,115 @@ async function safeRun(message, fn) {
   }
 }
 
+async function loadOptional(command, fallback = null) {
+  try {
+    return await api.invokeCommand(command);
+  } catch (error) {
+    console.warn(`${command} failed`, error);
+    return fallback;
+  }
+}
+
+function nowLabel() {
+  return new Date().toLocaleTimeString("zh-CN", { hour12: false });
+}
+
+function markRefresh(key, label, source = "自动") {
+  state.refreshMeta = {
+    ...(state.refreshMeta || {}),
+    [key]: nowLabel(),
+    label,
+    source
+  };
+}
+
+async function refreshTodayContext(source = "自动") {
+  state.matches = await loadOptional("list_matches", state.matches);
+  if (!state.selectedSimMatchId && state.matches.length) {
+    state.selectedSimMatchId = state.matches[0].id;
+  }
+  if (!state.selectedAnalysisMatchId && state.matches.length) {
+    state.selectedAnalysisMatchId = state.matches[0].id;
+  }
+  state.recommendations = await loadOptional("list_recommendations", state.recommendations || []);
+  state.todayPlan = await loadOptional("today_bet_plan", state.todayPlan);
+  state.practicalAdvice = await loadOptional("worldcup_practical_advice", state.practicalAdvice);
+  state.scorePriors = await loadOptional("get_worldcup_knockout_score_priors", state.scorePriors);
+  state.upsetLabSummary = await loadOptional("get_upset_lab_summary", state.upsetLabSummary);
+  state.preMatchSnapshots = await loadOptional("get_pre_match_snapshots", state.preMatchSnapshots || []);
+  state.activeModel = await loadOptional("get_active_model_info", state.activeModel);
+  state.systemStatus = await loadOptional("get_system_status", state.systemStatus);
+  markRefresh("lastTodayAt", "今日方案已更新", source);
+}
+
+async function refreshPredictionContext(source = "自动") {
+  state.analyses = await loadOptional("list_match_analyses", state.analyses || []);
+  state.scorePriors = await loadOptional("get_worldcup_knockout_score_priors", state.scorePriors);
+  state.recommendations = await loadOptional("list_recommendations", state.recommendations || []);
+  markRefresh("lastTodayAt", "预测概率已更新", source);
+}
+
+async function refreshOddsContext(source = "自动") {
+  await api.invokeCommand("refresh_core_data", { oddsApiKey: "", region: "eu" });
+  state.movements = await loadOptional("list_odds_movements", state.movements || []);
+  state.anomalies = await loadOptional("list_odds_anomalies", state.anomalies || []);
+  state.oddsHistory = await loadOptional("list_odds_history", state.oddsHistory || []);
+  await refreshTodayContext(source);
+  markRefresh("lastOddsAt", "赔率与推荐已更新", source);
+}
+
+async function refreshResultsAndSettle(source = "自动") {
+  state.results = await loadOptional("refresh_results", state.results || []);
+  state.settleSummary = await loadOptional("auto_settle_predictions", state.settleSummary);
+  state.predictions = await loadOptional("list_predictions", state.predictions || []);
+  state.reviewOddsImpact = await loadOptional("list_review_odds_impact", state.reviewOddsImpact || []);
+  state.diagnostics = await loadOptional("model_diagnostics", state.diagnostics);
+  state.backtest = await loadOptional("backtest_report", state.backtest);
+  state.livePaperSummary = await loadOptional("get_live_paper_trading_summary", state.livePaperSummary);
+  state.livePaperRecords = await loadOptional("get_live_paper_trading_records", state.livePaperRecords || []);
+  markRefresh("lastResultsAt", "赛果与复盘结算已更新", source);
+}
+
+async function refreshDataHealth(source = "自动") {
+  state.status = await loadOptional("app_status", state.status);
+  state.providers = state.status?.providers || await loadOptional("list_providers", state.providers || []);
+  state.systemStatus = await loadOptional("get_system_status", state.systemStatus);
+  state.preMatchSnapshots = await loadOptional("get_pre_match_snapshots", state.preMatchSnapshots || []);
+  state.snapshotAuditLogs = await loadOptional("get_snapshot_audit_logs", state.snapshotAuditLogs || []);
+  state.livePaperSummary = await loadOptional("get_live_paper_trading_summary", state.livePaperSummary);
+  state.livePaperRecords = await loadOptional("get_live_paper_trading_records", state.livePaperRecords || []);
+  markRefresh("lastHealthAt", "数据源健康已更新", source);
+}
+
+async function refreshViewContext(view, source = "切页", force = false) {
+  const now = Date.now();
+  const last = state.viewRefreshAt?.[view] || 0;
+  if (!force && now - last < 45000) return;
+  state.viewRefreshAt = { ...(state.viewRefreshAt || {}), [view]: now };
+  if (view === "today") await refreshTodayContext(source);
+  if (view === "prediction" || view === "match") await refreshPredictionContext(source);
+  if (view === "movements") await refreshOddsContext(source);
+  if (view === "upset") {
+    state.scorePriors = await loadOptional("get_worldcup_knockout_score_priors", state.scorePriors);
+    state.upsetLabCandidates = await loadOptional("get_upset_lab_candidates", state.upsetLabCandidates || []);
+    state.upsetLabSummary = await loadOptional("get_upset_lab_summary", state.upsetLabSummary);
+    state.upsetLabBacktest = await loadOptional("get_upset_lab_backtest_summary", state.upsetLabBacktest);
+    state.upsetLabRobustness = await loadOptional("get_upset_lab_robustness_summary", state.upsetLabRobustness);
+    state.upsetLabDebug = await loadOptional("debug_upset_lab_generation", state.upsetLabDebug);
+    markRefresh("lastTodayAt", "冷门实验室已更新", source);
+  }
+  if (view === "results") await refreshResultsAndSettle(source);
+  if (view === "review") {
+    state.predictions = await loadOptional("list_predictions", state.predictions || []);
+    state.reviewOddsImpact = await loadOptional("list_review_odds_impact", state.reviewOddsImpact || []);
+    state.dailyReviewSummary = await api.invokeCommand("daily_review_summary", { date: "2026-06-29" }).catch(() => state.dailyReviewSummary);
+    state.diagnostics = await loadOptional("model_diagnostics", state.diagnostics);
+    state.backtest = await loadOptional("backtest_report", state.backtest);
+    markRefresh("lastResultsAt", "复盘统计已更新", source);
+  }
+  if (view === "sources") await refreshDataHealth(source);
+}
+
 async function loadStatus() {
   state.status = await api.invokeCommand("app_status");
   state.providers = state.status?.providers || await api.invokeCommand("list_providers");
@@ -49,6 +156,8 @@ async function loadStatus() {
     state.selectedSimMatchId = state.matches[0].id;
   }
   state.predictions = await api.invokeCommand("list_predictions");
+  state.reviewOddsImpact = await loadOptional("list_review_odds_impact", []);
+  state.dailyReviewSummary = await api.invokeCommand("daily_review_summary", { date: "2026-06-29" }).catch(() => null);
   state.movements = await api.invokeCommand("list_odds_movements");
   state.anomalies = await api.invokeCommand("list_odds_anomalies");
   state.oddsHistory = await api.invokeCommand("list_odds_history");
@@ -60,24 +169,22 @@ async function loadStatus() {
   state.activeModel = await api.invokeCommand("get_active_model_info");
   state.systemStatus = await api.invokeCommand("get_system_status");
   state.backtest = await api.invokeCommand("backtest_report");
-  try {
-    state.recommendations = await api.invokeCommand("list_recommendations");
-    state.analyses = await api.invokeCommand("list_match_analyses");
-    state.todayPlan = await api.invokeCommand("today_bet_plan");
-    state.preMatchSnapshots = await api.invokeCommand("get_pre_match_snapshots");
-    state.snapshotAuditLogs = await api.invokeCommand("get_snapshot_audit_logs");
-    state.livePaperSummary = await api.invokeCommand("get_live_paper_trading_summary");
-    state.livePaperRecords = await api.invokeCommand("get_live_paper_trading_records");
-    state.systemStatus = await api.invokeCommand("get_system_status");
-  } catch {
-    state.recommendations = [];
-    state.analyses = [];
-    state.todayPlan = null;
-    state.preMatchSnapshots = [];
-    state.snapshotAuditLogs = [];
-    state.livePaperSummary = null;
-    state.livePaperRecords = [];
-  }
+  state.recommendations = await loadOptional("list_recommendations", []);
+  state.analyses = await loadOptional("list_match_analyses", []);
+  state.todayPlan = await loadOptional("today_bet_plan", null);
+  state.practicalAdvice = await loadOptional("worldcup_practical_advice", null);
+  state.scorePriors = await loadOptional("get_worldcup_knockout_score_priors", null);
+  state.upsetLabCandidates = await loadOptional("get_upset_lab_candidates", []);
+  state.upsetLabSummary = await loadOptional("get_upset_lab_summary", null);
+  state.upsetLabBacktest = await loadOptional("get_upset_lab_backtest_summary", null);
+  state.upsetLabRobustness = await loadOptional("get_upset_lab_robustness_summary", null);
+  state.upsetLabDebug = await loadOptional("debug_upset_lab_generation", null);
+  state.preMatchSnapshots = await loadOptional("get_pre_match_snapshots", []);
+  state.snapshotAuditLogs = await loadOptional("get_snapshot_audit_logs", []);
+  state.livePaperSummary = await loadOptional("get_live_paper_trading_summary", null);
+  state.livePaperRecords = await loadOptional("get_live_paper_trading_records", []);
+  state.systemStatus = await loadOptional("get_system_status", state.systemStatus);
+  markRefresh("lastGlobalAt", "启动数据已加载", "启动");
 }
 
 async function refreshCore() {
@@ -85,7 +192,11 @@ async function refreshCore() {
     oddsApiKey: document.querySelector("#odds-key")?.value || "",
     region: document.querySelector("#odds-region")?.value || "eu"
   });
-  await loadStatus();
+  state.movements = await loadOptional("list_odds_movements", state.movements || []);
+  state.anomalies = await loadOptional("list_odds_anomalies", state.anomalies || []);
+  state.oddsHistory = await loadOptional("list_odds_history", state.oddsHistory || []);
+  await refreshTodayContext("手动");
+  markRefresh("lastOddsAt", "赔率与今日方案已更新", "手动");
 }
 
 async function refreshXg() {
@@ -100,6 +211,7 @@ async function refreshSportteryInjuries() {
 
 async function refreshResults() {
   state.results = await api.invokeCommand("refresh_results");
+  markRefresh("lastResultsAt", "赛果已更新", "手动");
 }
 
 async function importHistoricalResults() {
@@ -121,8 +233,9 @@ async function importTeamStats() {
 }
 
 async function autoSettle() {
-  await api.invokeCommand("auto_settle_predictions");
+  state.settleSummary = await api.invokeCommand("auto_settle_predictions");
   state.predictions = await api.invokeCommand("list_predictions");
+  state.reviewOddsImpact = await loadOptional("list_review_odds_impact", state.reviewOddsImpact || []);
   state.diagnostics = await api.invokeCommand("model_diagnostics");
 }
 
@@ -149,31 +262,114 @@ async function runSimulation() {
 async function saveRecommendation(index) {
   const item = state.recommendations[index];
   if (!item) return;
-  await api.invokeCommand("save_prediction", {
-    record: {
-      match_label: item.match_label,
-      market: item.market,
-      pick: item.pick,
-      probability: item.model_prob,
-      odds: item.odds,
-      safety_margin: item.probability_gap,
-      decision: item.decision,
-      stake_pct: item.stake_pct
-    }
+  await saveReviewRecord({
+    match_label: item.match_label,
+    market: item.market,
+    pick: item.pick,
+    probability: item.model_prob,
+    odds: item.odds,
+    safety_margin: item.probability_gap,
+    decision: item.decision,
+    stake_pct: item.stake_pct
   });
+}
+
+async function saveReviewRecord(record) {
+  await api.invokeCommand("save_prediction", { record });
   state.predictions = await api.invokeCommand("list_predictions");
+  state.reviewOddsImpact = await loadOptional("list_review_odds_impact", state.reviewOddsImpact || []);
   state.diagnostics = await api.invokeCommand("model_diagnostics");
+}
+
+function analysisReviewRecord(matchIndex, group, itemIndex) {
+  const match = state.analyses[Number(matchIndex)];
+  const row = match?.[group]?.[Number(itemIndex)];
+  if (!match || !row) return null;
+  const marketMap = {
+    had: "预测中心-HAD胜平负",
+    hhad: `预测中心-HHAD让球胜平负 ${match.hhad_line || ""}`.trim(),
+    ttg: "预测中心-TTG总进球",
+    scores: "预测中心-比分参考"
+  };
+  return {
+    match_label: match.match_label,
+    market: marketMap[group] || `预测中心-${group}`,
+    pick: row.pick,
+    probability: row.probability || 0,
+    odds: row.sporttery_odds || row.fair_odds || 0,
+    safety_margin: row.probability_gap == null ? 0 : row.probability_gap,
+    decision: group === "scores" ? "比分参考" : "模型预测",
+    stake_pct: 0
+  };
+}
+
+async function saveAnalysisReview(matchIndex, group, itemIndex) {
+  const record = analysisReviewRecord(matchIndex, group, itemIndex);
+  if (record) await saveReviewRecord(record);
+}
+
+function simReviewRecord(group, index) {
+  const sim = state.simulation;
+  if (!sim) return null;
+  const matchLabel = `${rankedTeam(document.querySelector("#sim-home")?.value || "")} vs ${rankedTeam(document.querySelector("#sim-away")?.value || "")}`;
+  if (group === "market") {
+    const row = sim.market_rows?.[Number(index)];
+    if (!row) return null;
+    return {
+      match_label: matchLabel,
+      market: "模拟对决-HAD胜平负",
+      pick: row.pick,
+      probability: row.model_prob || 0,
+      odds: row.sporttery_odds || row.fair_odds || 0,
+      safety_margin: row.gap_vs_sporttery == null ? 0 : row.gap_vs_sporttery,
+      decision: "模拟观察",
+      stake_pct: 0
+    };
+  }
+  if (group === "total") {
+    const row = sim.total_goals?.[Number(index)];
+    if (!row) return null;
+    return {
+      match_label: matchLabel,
+      market: "模拟对决-TTG总进球",
+      pick: row.score,
+      probability: row.probability || 0,
+      odds: 0,
+      safety_margin: 0,
+      decision: "模拟观察",
+      stake_pct: 0
+    };
+  }
+  const row = sim.top_scores?.[Number(index)];
+  if (!row) return null;
+  return {
+    match_label: matchLabel,
+    market: "模拟对决-比分参考",
+    pick: row.score,
+    probability: row.probability || 0,
+    odds: 0,
+    safety_margin: 0,
+    decision: "比分参考",
+    stake_pct: 0
+  };
+}
+
+async function saveSimulationReview(group, index) {
+  const record = simReviewRecord(group, index);
+  if (record) await saveReviewRecord(record);
 }
 
 async function deletePrediction(id) {
   await api.invokeCommand("delete_prediction", { id: Number(id) });
   state.predictions = await api.invokeCommand("list_predictions");
+  state.reviewOddsImpact = await loadOptional("list_review_odds_impact", state.reviewOddsImpact || []);
   state.diagnostics = await api.invokeCommand("model_diagnostics");
 }
 
 async function settlePrediction(id, hit) {
   await api.invokeCommand("settle_prediction", { id: Number(id), hit });
   state.predictions = await api.invokeCommand("list_predictions");
+  state.reviewOddsImpact = await loadOptional("list_review_odds_impact", state.reviewOddsImpact || []);
   state.diagnostics = await api.invokeCommand("model_diagnostics");
   state.backtest = await api.invokeCommand("backtest_report");
 }
@@ -201,12 +397,13 @@ async function saveExternalConfig() {
   state.externalConfig = await api.invokeCommand("get_external_source_config");
 }
 
-async function saveProviderCredential(providerId) {
-  const apiKey = document.querySelector(`#provider-key-${providerId}`)?.value || "";
+async function saveProviderCredential(providerId, apiKeyOverride = null) {
+  const apiKey = apiKeyOverride ?? (document.querySelector(`#provider-key-${providerId}`)?.value || "");
   state.probeResult = await api.invokeCommand("save_provider_credential", {
     input: { provider_id: providerId, api_key: apiKey }
   });
   state.providers = await api.invokeCommand("list_providers");
+  state.status = await api.invokeCommand("app_status");
 }
 
 async function clearProviderCredential(providerId) {
@@ -232,10 +429,21 @@ async function clearProviderCache(providerId) {
 }
 
 async function refreshExternalSources() {
+  state.dataRefreshProgress = { step: 0, total: 9, percent: 0, label: "准备刷新", status: "running", message: "开始全局数据源刷新" };
   state.probeResult = await api.invokeCommand("refresh_all_data_sources");
+  state.dataRefreshProgress = { step: 9, total: 9, percent: 1, label: "全局刷新完成", status: "ok", message: state.probeResult?.message || "全局数据源刷新完成" };
   state.status = await api.invokeCommand("app_status");
   state.providers = state.status?.providers || await api.invokeCommand("list_providers");
   state.activeModel = await api.invokeCommand("get_active_model_info");
+  state.matches = await api.invokeCommand("list_matches");
+  state.recommendations = await api.invokeCommand("list_recommendations").catch(() => state.recommendations || []);
+  state.todayPlan = await api.invokeCommand("today_bet_plan").catch(() => state.todayPlan);
+  state.practicalAdvice = await api.invokeCommand("worldcup_practical_advice").catch(() => state.practicalAdvice);
+  state.upsetLabCandidates = await api.invokeCommand("get_upset_lab_candidates").catch(() => state.upsetLabCandidates || []);
+  state.upsetLabSummary = await api.invokeCommand("get_upset_lab_summary").catch(() => state.upsetLabSummary);
+  state.upsetLabBacktest = await api.invokeCommand("get_upset_lab_backtest_summary").catch(() => state.upsetLabBacktest);
+  state.upsetLabRobustness = await api.invokeCommand("get_upset_lab_robustness_summary").catch(() => state.upsetLabRobustness);
+  state.upsetLabDebug = await api.invokeCommand("debug_upset_lab_generation").catch(() => state.upsetLabDebug);
 }
 
 async function runTrainingPipeline() {
@@ -280,12 +488,14 @@ async function collectWorldcupSnapshot() {
 async function createPreMatchSnapshot(matchId) {
   state.probeResult = await api.invokeCommand("create_pre_match_snapshot", { matchId });
   state.preMatchSnapshots = await api.invokeCommand("get_pre_match_snapshots");
+  state.practicalAdvice = await api.invokeCommand("worldcup_practical_advice");
 }
 
 async function createTodayPreMatchSnapshots() {
   state.probeResult = await api.invokeCommand("create_today_pre_match_snapshots");
   state.preMatchSnapshots = await api.invokeCommand("get_pre_match_snapshots");
   state.livePaperSummary = await api.invokeCommand("get_live_paper_trading_summary");
+  state.practicalAdvice = await api.invokeCommand("worldcup_practical_advice");
 }
 
 async function markFinalPreMatchSnapshot(snapshotId) {
@@ -293,6 +503,7 @@ async function markFinalPreMatchSnapshot(snapshotId) {
   state.preMatchSnapshots = await api.invokeCommand("get_pre_match_snapshots");
   state.snapshotAuditLogs = await api.invokeCommand("get_snapshot_audit_logs");
   state.livePaperSummary = await api.invokeCommand("get_live_paper_trading_summary");
+  state.practicalAdvice = await api.invokeCommand("worldcup_practical_advice");
 }
 
 async function settlePreMatchSnapshot(snapshotId) {
@@ -308,6 +519,7 @@ async function settlePreMatchSnapshot(snapshotId) {
   state.preMatchSnapshots = await api.invokeCommand("get_pre_match_snapshots");
   state.livePaperSummary = await api.invokeCommand("get_live_paper_trading_summary");
   state.livePaperRecords = await api.invokeCommand("get_live_paper_trading_records");
+  state.practicalAdvice = await api.invokeCommand("worldcup_practical_advice");
 }
 
 async function settleAllFinishedSnapshots() {
@@ -315,6 +527,7 @@ async function settleAllFinishedSnapshots() {
   state.preMatchSnapshots = await api.invokeCommand("get_pre_match_snapshots");
   state.livePaperSummary = await api.invokeCommand("get_live_paper_trading_summary");
   state.livePaperRecords = await api.invokeCommand("get_live_paper_trading_records");
+  state.practicalAdvice = await api.invokeCommand("worldcup_practical_advice");
 }
 
 async function auditPreMatchSnapshots() {
@@ -368,6 +581,34 @@ async function runWorldcupClosureCycle() {
   await loadStatus();
 }
 
+async function refreshUpsetLab() {
+  state.probeResult = await api.invokeCommand("generate_upset_lab_candidates");
+  state.scorePriors = await api.invokeCommand("get_worldcup_knockout_score_priors");
+  state.upsetLabCandidates = await api.invokeCommand("get_upset_lab_candidates");
+  state.upsetLabSummary = await api.invokeCommand("get_upset_lab_summary");
+  state.upsetLabBacktest = await api.invokeCommand("get_upset_lab_backtest_summary");
+  state.upsetLabRobustness = await api.invokeCommand("get_upset_lab_robustness_summary");
+  state.upsetLabDebug = await api.invokeCommand("debug_upset_lab_generation");
+  markRefresh("lastTodayAt", "冷门实验室候选已生成", "手动");
+}
+
+async function createUpsetPaperTrades() {
+  state.probeResult = await api.invokeCommand("create_upset_lab_paper_trades");
+  state.upsetLabCandidates = await api.invokeCommand("get_upset_lab_candidates");
+  state.upsetLabSummary = await api.invokeCommand("get_upset_lab_summary");
+  state.upsetLabBacktest = await api.invokeCommand("get_upset_lab_backtest_summary");
+  state.upsetLabDebug = await api.invokeCommand("debug_upset_lab_generation");
+}
+
+async function settleUpsetPaperTrades() {
+  state.probeResult = await api.invokeCommand("settle_upset_lab_paper_trades");
+  state.upsetLabCandidates = await api.invokeCommand("get_upset_lab_candidates");
+  state.upsetLabSummary = await api.invokeCommand("get_upset_lab_summary");
+  state.upsetLabBacktest = await api.invokeCommand("get_upset_lab_backtest_summary");
+  state.upsetLabRobustness = await api.invokeCommand("get_upset_lab_robustness_summary");
+  state.upsetLabDebug = await api.invokeCommand("debug_upset_lab_generation");
+}
+
 function numberOrNull(value) {
   const num = Number(value);
   return Number.isFinite(num) && num > 0 ? num : null;
@@ -381,6 +622,54 @@ function fileSize(bytes) {
   return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
+function dataRefreshProgressHtml(compact = false) {
+  const progress = state.dataRefreshProgress;
+  if (!progress) return "";
+  const total = Number(progress.total || 8);
+  const step = Number(progress.step || 0);
+  const percent = Math.round(Number(progress.percent ?? (total ? step / total : 0)) * 100);
+  return `
+    <section class="panel ${compact ? "progress-panel" : "span-12 progress-panel"}">
+      <div class="progress-head">
+        <strong>${progress.label || "全局刷新数据源"}</strong>
+        <span>${percent}% · ${step} / ${total}</span>
+      </div>
+      <progress value="${step}" max="${total || 1}"></progress>
+      <p class="muted">${badge(progress.status || "running")} ${progress.message || "正在刷新数据源..."}</p>
+    </section>
+  `;
+}
+
+function pageDescription(view = state.view) {
+  const descriptions = {
+    today: "行动页：主推、小注、观察、禁买和比分参考集中在这里。",
+    prediction: "概率总览：看模型真实概率，不直接等于投注建议。",
+    match: "单场深挖：拆胜平负、让球、总进球、比分和市场差异。",
+    sim: "假设推演：手动调整 λ 后运行 Monte Carlo。",
+    movements: "市场监控：赔率快照、异动和异常风险。",
+    upset: "高风险观察：冷平、让球爆冷、极端总进球和比分只做纸面/极小仓位实验。",
+    results: "赛果与结算入口：最新比赛在上，自动带动复盘。",
+    review: "表现评估：保存记录、自动结算、ROI 和策略诊断。",
+    sources: "系统维护：数据源健康、API额度、备份导出。"
+  };
+  return descriptions[view] || "本地缓存、稳健推荐、异动记录、模拟对决。";
+}
+
+function refreshStatusHtml() {
+  const meta = state.refreshMeta || {};
+  const status = state.systemStatus || {};
+  return `
+    <div class="refresh-strip">
+      <span>${state.busy ? "正在处理" : "自动刷新就绪"}</span>
+      <span>${meta.label || state.message || "准备就绪"}</span>
+      <span>今日 ${meta.lastTodayAt || "-"}</span>
+      <span>赔率 ${meta.lastOddsAt || "-"}</span>
+      <span>赛果 ${meta.lastResultsAt || "-"}</span>
+      <span>数据源 ${state.status?.sources?.length || "-"} 项</span>
+    </div>
+  `;
+}
+
 function sourceCards() {
   const sources = state.status?.sources || [];
   return sources.map(source => `
@@ -392,6 +681,255 @@ function sourceCards() {
       <div>${source.count ? `${source.count} 条` : ""}</div>
     </div>
   `).join("");
+}
+
+function upsetPoolLabel(pool = "") {
+  const labels = {
+    cold_draw_pool: "冷平池",
+    handicap_upset_pool: "让球爆冷池",
+    favorite_narrow_win_pool: "强队险胜池",
+    underdog_first_goal_script_pool: "弱队先进球剧本池",
+    half_fulltime_reversal_pool: "半全场反转池",
+    extreme_total_goals_pool: "总进球极端池",
+    high_odds_score_pool: "高赔率比分池",
+    score_3_3_pool: "3:3 专项池",
+    forbidden_upset_pool: "禁碰冷门"
+  };
+  return labels[pool] || pool || "-";
+}
+
+function upsetDecisionLabel(decision = "") {
+  const labels = {
+    no_odds_scan: "剧本扫描",
+    scan_only: "扫描观察",
+    paper_candidate: "纸面候选",
+    tiny_stake_candidate: "极小仓位候选",
+    observe_only: "观察",
+    forbidden: "禁碰",
+    wait_for_lineup: "等待阵容",
+    wait_for_odds: "等待赔率",
+    insufficient_data: "数据不足"
+  };
+  return labels[decision] || decision || "-";
+}
+
+function upsetReasonText(value) {
+  if (!value) return "-";
+  if (Array.isArray(value)) return value.map(item => typeof item === "string" ? item : JSON.stringify(item)).join("；");
+  if (value.reasons && Array.isArray(value.reasons)) return value.reasons.join("；");
+  if (value.risk_text) return value.risk_text;
+  return typeof value === "string" ? value : JSON.stringify(value);
+}
+
+function upsetRows(pool, emptyText = "暂无候选。") {
+  const rows = (state.upsetLabCandidates || []).filter(item => item.play_pool === pool);
+  if (!rows.length) {
+    return `<tr><td colspan="14" class="muted">${emptyText}</td></tr>`;
+  }
+  return rows.map(item => {
+    const decision = item.final_lab_decision || "";
+    const noOdds = decision === "no_odds_scan";
+    const rowClass = decision === "forbidden" ? "prediction-miss" : decision === "tiny_stake_candidate" ? "row-watch" : "";
+    return `
+      <tr class="${rowClass}">
+        <td>${item.match_time || "-"}</td>
+        <td><strong>${rankedTeam(item.home_team)} vs ${rankedTeam(item.away_team)}</strong><div class="muted">${item.stage || item.source_snapshot_type || "-"}</div></td>
+        <td>${upsetPoolLabel(item.play_pool)}<div class="muted">${item.play_type || "-"}</div></td>
+        <td><strong>${item.selection || "-"}</strong></td>
+        <td>${noOdds || item.odds == null ? "-" : odds(item.odds)}</td>
+        <td>${pct(item.model_prob)}</td>
+        <td>${noOdds || item.market_prob == null ? "-" : pct(item.market_prob)}</td>
+        <td>${noOdds || item.ev == null ? "-" : signedPct(item.ev)}</td>
+        <td>${Number(item.scan_score || 0).toFixed(0)}</td>
+        <td>${Number(item.upset_score || 0).toFixed(0)}</td>
+        <td>${Number(item.chaos_score || 0).toFixed(0)}</td>
+        <td>${badge(upsetDecisionLabel(decision))}<div class="muted">${item.risk_level || "-"}</div></td>
+        <td>${money(item.stake_pct || 0)}<div class="muted">${item.stake_advice || "纸面观察"}</div></td>
+        <td class="muted">${upsetReasonText(decision === "forbidden" ? item.block_reasons : item.trigger_reasons)}</td>
+      </tr>
+    `;
+  }).join("");
+}
+
+function upsetBacktestRows(rows = []) {
+  if (!rows.length) return `<tr><td colspan="10" class="muted">暂无已结算纸面交易样本。</td></tr>`;
+  return rows.map(item => `
+    <tr>
+      <td>${upsetPoolLabel(item.group)}</td>
+      <td>${item.bet_count || 0}</td>
+      <td>${item.hit_count || 0}</td>
+      <td>${pct(item.hit_rate)}</td>
+      <td class="${Number(item.roi || 0) >= 0 ? "down" : "up"}">${signedPct(item.roi)}</td>
+      <td>${signedPct(item.total_profit || 0)}</td>
+      <td>${signedPct(item.max_drawdown || 0)}</td>
+      <td>${odds(item.avg_odds)}</td>
+      <td>${signedPct(item.avg_ev)}</td>
+      <td>${Number(item.avg_scan_score || 0).toFixed(0)} / ${Number(item.avg_upset_score || 0).toFixed(0)} / ${Number(item.avg_chaos_score || 0).toFixed(0)}</td>
+    </tr>
+  `).join("");
+}
+
+function upsetFunnelHtml() {
+  const funnel = state.upsetLabSummary?.scan_funnel || {};
+  return `
+    <section class="panel span-12">
+      <h3>空态过滤漏斗</h3>
+      <div class="plan-grid">
+        <div><h4>今日比赛</h4><p class="muted">${funnel.match_count || 0}</p></div>
+        <div><h4>赛前快照</h4><p class="muted">${funnel.snapshot_count || 0}</p></div>
+        <div><h4>有赔率比赛</h4><p class="muted">${funnel.odds_match_count || 0}</p></div>
+        <div><h4>基础赔率区间</h4><p class="muted">${funnel.base_odds_band_count || 0}</p></div>
+        <div><h4>冷平扫描</h4><p class="muted">${funnel.cold_draw_scan_count || 0}</p></div>
+        <div><h4>让球爆冷扫描</h4><p class="muted">${funnel.handicap_scan_count || 0}</p></div>
+        <div><h4>比分扫描</h4><p class="muted">${funnel.score_scan_count || 0}</p></div>
+        <div><h4>hard_ban/禁碰</h4><p class="muted">${funnel.hard_ban_count || 0}</p></div>
+        <div><h4>数据不足</h4><p class="muted">${funnel.data_insufficient_count || 0}</p></div>
+        <div><h4>赔率缺失</h4><p class="muted">${funnel.missing_odds_count || 0}</p></div>
+      </div>
+    </section>
+  `;
+}
+
+function scorePriorCardHtml() {
+  const summary = state.scorePriors?.summary || state.practicalAdvice?.score_prior || {};
+  return `
+    <section class="panel span-12">
+      <h3>近两届世界杯淘汰赛90分钟比分先验</h3>
+      <p class="muted">${summary.message || "本系统按竞彩口径统计90分钟比分，加时和点球不计入比分先验。该先验只用于比分参考和剧本扫描，不直接构成下注建议。"}</p>
+      <div class="plan-grid">
+        <div><h4>样本</h4><p class="muted">${summary.sample_count || 32} 场</p></div>
+        <div><h4>90分钟平局</h4><p class="muted">${pct(summary.draw_90min ?? 0.3125)}</p></div>
+        <div><h4>最高频比分</h4><p class="muted">1-1 · ${pct(summary.score_1_1 ?? 0.1875)}</p></div>
+        <div><h4>2-1 型</h4><p class="muted">${pct(summary.score_2_1_type ?? 0.15625)}</p></div>
+        <div><h4>2-0 型</h4><p class="muted">${pct(summary.score_2_0_type ?? 0.15625)}</p></div>
+        <div><h4>1-0 型</h4><p class="muted">${pct(summary.score_1_0_type ?? 0.09375)}</p></div>
+        <div><h4>0-0 / 2-2</h4><p class="muted">${pct(summary.score_0_0 ?? 0.0625)} / ${pct(summary.score_2_2 ?? 0.0625)}</p></div>
+        <div><h4>3-3</h4><p class="up">${pct(summary.score_3_3 ?? 0)} · 极端低频</p></div>
+        <div><h4>2球</h4><p class="muted">${pct(summary.two_goals ?? 0.34375)}</p></div>
+        <div><h4>3球 / 4球</h4><p class="muted">${pct(summary.three_goals ?? 0.21875)} / ${pct(summary.four_goals ?? 0.125)}</p></div>
+        <div><h4>小于2.5</h4><p class="muted">${pct(summary.under_2_5 ?? 0.5)}</p></div>
+        <div><h4>大于2.5</h4><p class="muted">${pct(summary.over_2_5 ?? 0.5)}</p></div>
+      </div>
+    </section>
+  `;
+}
+
+function upsetRobustnessHtml() {
+  const item = state.upsetLabRobustness || {};
+  const reasons = item.blocking_reasons || [];
+  const warnings = item.warnings || [];
+  return `
+    <section class="panel span-12">
+      <h3>稳健性观察</h3>
+      <div class="plan-grid">
+        <div><h4>稳健性等级</h4><p class="muted">${badge(item.robustness_level || "weak")}</p></div>
+        <div><h4>样本数</h4><p class="muted">${item.bet_count || 0}</p></div>
+        <div><h4>整体 ROI</h4><p class="${Number(item.roi || 0) >= 0 ? "down" : "up"}">${signedPct(item.roi || 0)}</p></div>
+        <div><h4>最近 30 / 50</h4><p class="muted">${signedPct(item.rolling_30_roi || 0)} / ${signedPct(item.rolling_50_roi || 0)}</p></div>
+        <div><h4>去 Top5 后</h4><p class="${Number(item.roi_after_remove_top5 || 0) >= 0 ? "down" : "up"}">${signedPct(item.roi_after_remove_top5 || 0)}</p></div>
+        <div><h4>极小仓位</h4><p class="muted">${item.can_consider_tiny_stake ? "可考虑，但不自动启用" : "不可升级"}</p></div>
+      </div>
+      <p class="muted">${[...reasons, ...warnings].join("；") || "样本仍在观察中。"}</p>
+    </section>
+  `;
+}
+
+function upsetDebugHtml() {
+  const debug = state.upsetLabDebug || {};
+  const funnel = debug.data_funnel || state.upsetLabSummary?.scan_funnel || {};
+  return `
+    <section class="panel span-12">
+      <h3>调试信息</h3>
+      <p class="muted">empty_reason：${debug.empty_reason || funnel.empty_reason || "-"}</p>
+      <div class="plan-grid">
+        <div><h4>前 5 场比赛</h4><p class="muted">${(debug.first_5_today_matches || []).map(item => `${item.home_team} vs ${item.away_team}`).join("；") || "-"}</p></div>
+        <div><h4>快照ID</h4><p class="muted">${(debug.snapshot_match_ids || []).slice(0, 8).join("；") || "-"}</p></div>
+        <div><h4>赔率ID</h4><p class="muted">${(debug.odds_match_ids || []).slice(0, 8).join("；") || "-"}</p></div>
+        <div><h4>候选预览</h4><p class="muted">${(debug.generated_candidates_preview || []).map(item => `${item.play_pool || "-"}:${item.selection || "-"}`).join("；") || "-"}</p></div>
+      </div>
+    </section>
+  `;
+}
+
+function upsetLabHtml() {
+  const summary = state.upsetLabSummary || {};
+  const backtest = state.upsetLabBacktest || {};
+  const funnel = summary.scan_funnel || {};
+  const noOddsMode = Number(funnel.generated_no_odds_scan_count || 0) > 0 || Number(funnel.odds_missing_count || funnel.missing_odds_count || 0) > 0;
+  const noSnapshotMode = Number(funnel.pre_match_snapshot_count ?? funnel.snapshot_count ?? 0) === 0 && Number(funnel.today_matches_count ?? funnel.match_count ?? 0) > 0;
+  const pools = [
+    ["cold_draw_pool", "冷平池"],
+    ["handicap_upset_pool", "让球爆冷池"],
+    ["favorite_narrow_win_pool", "强队险胜池"],
+    ["underdog_first_goal_script_pool", "弱队先进球剧本池"],
+    ["half_fulltime_reversal_pool", "半全场反转池"],
+    ["extreme_total_goals_pool", "总进球极端池"],
+    ["high_odds_score_pool", "高赔率比分池"],
+    ["score_3_3_pool", "3:3 专项池"],
+    ["forbidden_upset_pool", "禁碰冷门"]
+  ];
+  return `
+    <div class="grid">
+      <section class="panel span-12 toolbar">
+        <button class="btn" data-action="generate-upset-lab">生成冷门候选</button>
+        <button class="btn secondary" data-action="create-upset-paper">写入纸面交易</button>
+        <button class="btn secondary" data-action="settle-upset-paper">结算纸面交易</button>
+        <span class="muted">冷门实验室为高赔率高风险实验玩法，只建议纸面观察或极小仓位，不影响正式推荐，不保证盈利。</span>
+      </section>
+      <section class="panel span-12 notice">
+        冷门候选不会进入今日主推、正式推荐或小注候选；hard_ban 永远最高优先级。比分、3:3、半全场默认高风险。
+      </section>
+      ${scorePriorCardHtml()}
+      ${noOddsMode ? `<section class="panel span-12 notice">当前缺少赔率数据，已切换为冷门剧本扫描模式。以下内容仅用于判断冷门可能性，不计算EV，不建议下注。</section>` : ""}
+      ${noSnapshotMode ? `<section class="panel span-12 notice">当前无赛前快照，已使用即时模型/静态球队数据进行轻量扫描。建议先生成赛前快照以提高准确度。</section>` : ""}
+      <section class="panel span-3 metric"><span>总扫描候选</span><strong>${summary.candidate_count || 0}</strong><div class="muted">${summary.warning || "等待生成"}</div></section>
+      <section class="panel span-3 metric"><span>剧本扫描</span><strong>${summary.no_odds_scan_count || 0}</strong><div class="muted">无赔率，不计算EV</div></section>
+      <section class="panel span-3 metric"><span>可交易候选</span><strong>${(summary.paper_candidate_count || 0) + (summary.tiny_stake_candidate_count || 0)}</strong><div class="muted">可写入纸面交易</div></section>
+      <section class="panel span-3 metric"><span>扫描观察</span><strong>${summary.scan_only_count || 0}</strong><div class="muted">仅展示，不建议下注</div></section>
+      <section class="panel span-3 metric"><span>纸面候选</span><strong>${summary.paper_candidate_count || 0}</strong><div class="muted">不进入正式推荐</div></section>
+      <section class="panel span-3 metric"><span>极小仓位候选</span><strong>${summary.tiny_stake_candidate_count || 0}</strong><div class="muted">仅冷门实验室显示</div></section>
+      <section class="panel span-3 metric"><span>禁碰冷门</span><strong>${summary.forbidden_count || 0}</strong><div class="muted">hard_ban / 深负EV / 数据无效</div></section>
+      <section class="panel span-3 metric"><span>赔率缺失比赛</span><strong>${funnel.odds_missing_count ?? funnel.missing_odds_count ?? 0}</strong><div class="muted">自动走剧本扫描</div></section>
+      <section class="panel span-3 metric"><span>快照缺失比赛</span><strong>${Math.max(0, Number(funnel.today_matches_count ?? funnel.match_count ?? 0) - Number(funnel.pre_match_snapshot_count ?? funnel.snapshot_count ?? 0))}</strong><div class="muted">使用轻量扫描</div></section>
+      ${(summary.candidate_count || 0) === 0 ? upsetFunnelHtml() : ""}
+      <section class="panel span-12">
+        <h3>预算与暂停规则</h3>
+        <div class="plan-grid">
+          <div><h4>单日预算上限</h4><p class="muted">${pct(summary.max_daily_budget_ratio ?? 0.005)}</p></div>
+          <div><h4>连续亏损</h4><p class="${summary.pause_triggered ? "up" : "muted"}">${summary.consecutive_losses || 0} 单</p></div>
+          <div><h4>模式</h4><p class="muted">${summary.default_mode || "paper_only"}</p></div>
+          <div><h4>状态</h4><p class="muted">${summary.paper_only_triggered ? "只允许纸面" : summary.pause_triggered ? "建议暂停" : "观察中"}</p></div>
+        </div>
+      </section>
+      <section class="panel span-12">
+        <h3>纸面交易回测</h3>
+        <div class="plan-grid">
+          <div><h4>样本数</h4><p class="muted">${backtest.bet_count || 0}</p></div>
+          <div><h4>命中率</h4><p class="muted">${pct(backtest.hit_rate || 0)}</p></div>
+          <div><h4>ROI</h4><p class="${Number(backtest.roi || 0) >= 0 ? "down" : "up"}">${signedPct(backtest.roi || 0)}</p></div>
+          <div><h4>最大回撤</h4><p class="muted">${signedPct(backtest.max_drawdown || 0)}</p></div>
+          <div><h4>平均赔率</h4><p class="muted">${odds(backtest.avg_odds || 0)}</p></div>
+          <div><h4>提示</h4><p class="muted">${backtest.warning || "等待更多结算样本"}</p></div>
+        </div>
+      </section>
+      ${upsetRobustnessHtml()}
+      ${upsetDebugHtml()}
+      <section class="panel span-12 table-panel">
+        <h3>按玩法池纸面表现</h3>
+        <div class="scroll-table">
+          <table><thead><tr><th>池</th><th>样本</th><th>命中</th><th>命中率</th><th>ROI</th><th>盈亏</th><th>回撤</th><th>均赔</th><th>均EV</th><th>扫描/冷门/混沌</th></tr></thead><tbody>${upsetBacktestRows(backtest.by_play_pool || [])}</tbody></table>
+        </div>
+      </section>
+      ${pools.map(([pool, title]) => `
+        <section class="panel span-12 table-panel">
+          <h3>${title}</h3>
+          <div class="scroll-table">
+            <table><thead><tr><th>时间</th><th>比赛</th><th>池/玩法</th><th>选择</th><th>赔率</th><th>模型</th><th>市场</th><th>EV</th><th>扫描分</th><th>冷门分</th><th>混沌分</th><th>决策</th><th>仓位</th><th>理由</th></tr></thead><tbody>${upsetRows(pool, pool === "forbidden_upset_pool" ? "暂无禁碰冷门。" : "今日无明显候选，但已完成扫描。")}</tbody></table>
+          </div>
+        </section>
+      `).join("")}
+    </div>
+  `;
 }
 
 function matchRows(limit = 80) {
@@ -414,8 +952,11 @@ function predictionRows() {
   if (!state.predictions.length) {
     return `<tr><td colspan="12" class="muted">暂无复盘记录。</td></tr>`;
   }
-  return state.predictions.map(record => `
-    <tr>
+  return state.predictions.map(record => {
+    const settledClass = record.actual_result === "命中" ? "prediction-hit" : record.actual_result === "未中" ? "prediction-miss" : "";
+    const profitText = predictionProfitText(record);
+    return `
+    <tr class="${settledClass}">
       <td>${record.created_at || "-"}</td>
       <td>${rankedMatchLabel(record.match_label)}</td>
       <td>${record.market}</td>
@@ -426,14 +967,114 @@ function predictionRows() {
       <td>${money(record.stake_pct || 0)}</td>
       <td>${badge(record.decision)}</td>
       <td>${record.actual_result || "未结算"}</td>
-      <td class="${(record.profit || 0) >= 0 ? "down" : "up"}">${signedPct(record.profit || 0)}</td>
+      <td class="${record.actual_result === "命中" ? "down" : record.actual_result === "未中" ? "up" : "muted"}">${profitText}</td>
       <td>
         <button class="mini" data-action="settle-hit" data-id="${record.id}">命中</button>
         <button class="mini" data-action="settle-miss" data-id="${record.id}">未中</button>
         <button class="mini danger" data-action="delete-prediction" data-id="${record.id}">删除</button>
       </td>
     </tr>
-  `).join("");
+  `;
+  }).join("");
+}
+
+function predictionProfitRate(record) {
+  if (record.actual_result === "命中") {
+    return Math.max(0, Number(record.odds || 0) - 1);
+  }
+  if (record.actual_result === "未中") {
+    return -1;
+  }
+  return null;
+}
+
+function predictionProfitText(record) {
+  const value = predictionProfitRate(record);
+  return value == null ? "-" : signedPct(value);
+}
+
+function reviewSummaryHtml() {
+  const settled = (state.predictions || []).filter(record => record.actual_result === "命中" || record.actual_result === "未中");
+  const hitCount = settled.filter(record => record.actual_result === "命中").length;
+  const profit = settled.reduce((sum, record) => sum + (predictionProfitRate(record) || 0), 0);
+  const stake = settled.length;
+  const roi = stake > 0 ? profit / stake : 0;
+  const hitRate = stake > 0 ? hitCount / stake : 0;
+  const unsettled = (state.predictions || []).length - stake;
+  return `
+    <section class="panel span-12">
+      <h3>复盘总览</h3>
+      <div class="plan-grid">
+        <div><h4>已结算</h4><p class="muted">${stake} 条 · 未结算 ${unsettled} 条</p></div>
+        <div><h4>命中率</h4><p class="muted">${pct(hitRate)} · 命中 ${hitCount}</p></div>
+        <div><h4>总盈亏</h4><p class="${profit >= 0 ? "down" : "up"}">${signedPct(profit)}</p></div>
+        <div><h4>复盘 ROI</h4><p class="${roi >= 0 ? "down" : "up"}">${signedPct(roi)}</p></div>
+      </div>
+      <p class="muted">口径：每条复盘按 1 单位投注计算，命中收益 = 赔率 - 1，未中 = -100%。</p>
+    </section>
+  `;
+}
+
+function dailyReviewSummaryHtml() {
+  const item = state.dailyReviewSummary;
+  if (!item) return "";
+  const playText = (item.by_play_type || []).map(row =>
+    `${row.play_type} ${row.corrected_hit_count}/${row.prediction_count}`
+  ).join("；");
+  return `
+    <section class="panel span-12">
+      <h3>${item.date || "2026-06-29"} 赛后复盘摘要</h3>
+      <div class="plan-grid">
+        <div><h4>比赛 / 预测</h4><p class="muted">${item.match_count || 0} 场 · ${item.prediction_count || 0} 条</p></div>
+        <div><h4>系统命中</h4><p class="muted">${item.hit_count || 0} · ${pct(item.hit_rate || 0)}</p></div>
+        <div><h4>修正后命中</h4><p class="muted">${item.corrected_hit_count || 0} · ${pct(item.corrected_hit_rate || 0)}</p></div>
+        <div><h4>按玩法</h4><p class="muted">${playText || "-"}</p></div>
+      </div>
+      <p class="muted">主要问题：${(item.main_findings || []).join("；") || "-"}</p>
+      <p class="muted">建议调整：${(item.model_adjustments_recommended || []).join("；") || "-"}</p>
+    </section>
+  `;
+}
+
+function oddsImpactRows() {
+  const rows = state.reviewOddsImpact || [];
+  if (!rows.length) {
+    return `<tr><td colspan="15" class="muted">暂无已结算盘口影响样本。先保存复盘记录，并在赛前多刷新几次赔率形成快照。</td></tr>`;
+  }
+  return rows.slice(0, 120).map(item => {
+    const hit = item.actual_result === "命中";
+    const delta = Number(item.delta_pct || 0);
+    return `
+      <tr class="${hit ? "prediction-hit" : "prediction-miss"}">
+        <td>${item.created_at || "-"}</td>
+        <td><strong>${rankedMatchLabel(item.match_label || "")}</strong><div class="muted">${item.stage || "-"}</div></td>
+        <td>${item.score || "-"}</td>
+        <td>${item.market || "-"}</td>
+        <td><strong>${item.pick || "-"}</strong><div class="muted">实际 ${item.actual_outcome || "-"}</div></td>
+        <td>${odds(item.initial_odds || 0)}</td>
+        <td>${odds(item.current_odds || 0)}</td>
+        <td>${odds(item.min_odds || 0)} / ${odds(item.max_odds || 0)}</td>
+        <td class="${delta <= 0 ? "down" : "up"}">${item.direction || "-"}<div>${item.snapshot_count < 2 ? "无法判断" : signedPct(delta)}</div></td>
+        <td>${item.snapshot_count || 0}<div class="muted">${(item.missing_snapshot_windows || []).slice(0, 3).join(" / ")}</div></td>
+        <td>${item.movement_count || 0}</td>
+        <td>${pct(item.probability || 0)}</td>
+        <td>${badge(item.actual_result || "-")}</td>
+        <td class="${(item.profit || 0) >= 0 ? "down" : "up"}">${signedPct(item.profit || 0)}</td>
+        <td class="muted">${item.impact_note || "-"}<div>${item.learning_tag || ""}</div></td>
+      </tr>
+    `;
+  }).join("");
+}
+
+function settleSummaryHtml() {
+  const item = state.settleSummary;
+  if (!item) return "";
+  return `
+    <div class="notice">
+      ${item.message || "自动结算完成"}
+      <span class="muted">已结算 ${item.settled ?? 0} · 未匹配赛果 ${item.unmatched_results ?? 0} · 玩法不支持 ${item.unsupported_markets ?? 0}</span>
+    </div>
+  `;
 }
 
 function badge(text) {
@@ -444,7 +1085,7 @@ function badge(text) {
 function recommendationRows(limit = 80) {
   const rows = state.recommendations.filter(item => state.recFilter === "全部" || item.tier === state.recFilter || item.decision === state.recFilter);
   if (!rows.length) {
-    return `<tr><td colspan="23" class="muted">暂无推荐。先在比赛中心点击“刷新核心数据”。</td></tr>`;
+    return `<tr><td colspan="23" class="muted">暂无推荐。系统会自动刷新，也可在今日方案点击“刷新赔率并重算”。</td></tr>`;
   }
   return rows.slice(0, limit).map((item) => {
     const index = state.recommendations.indexOf(item);
@@ -580,30 +1221,121 @@ function paperTradingSummaryHtml(source = state.backtest?.paper_trading) {
 
 function todayPlanHtml() {
   const plan = state.todayPlan;
-  if (!plan) {
-    return `<section class="panel span-12 muted">暂无今日方案。先刷新核心数据，再点击一键推荐买球。</section>`;
-  }
-  const comboBudget = plan.daily_budget * 0.2;
+  const advice = state.practicalAdvice || {};
+  const bankroll = advice.bankroll_suggestion || {};
+  const comboBudget = plan ? plan.daily_budget * 0.2 : 0;
   return `
     <div class="grid">
-      <section class="panel span-3 metric"><span>今日预算</span><strong>${Math.round(plan.daily_budget)}</strong><div class="muted">本金 ${Math.round(plan.bankroll)}</div></section>
-      <section class="panel span-3 metric"><span>最大亏损</span><strong>${Math.round(plan.max_loss)}</strong><div class="muted">触发后停止下注</div></section>
-      <section class="panel span-3 metric"><span>串关上限</span><strong>${Math.round(comboBudget)}</strong><div class="muted">不超过今日预算20%</div></section>
-      <section class="panel span-3 metric"><span>方案口径</span><strong>保守</strong><div class="muted">小注优先，比分默认不下注</div></section>
+      <section class="panel span-12">
+        <h3>今日方案</h3>
+        <p class="muted">${advice.notice || "本页面为模型辅助决策，不保证盈利。请控制仓位。"}</p>
+        <div class="plan-grid">
+          <div><h4>策略状态</h4><p class="muted">${advice.strategy_status || "observation_only"} · hard_ban 最高优先级</p></div>
+          <div><h4>今日主推仓位</h4><p class="muted">${bankroll.main || "0.75% - 1.25%"}</p></div>
+          <div><h4>小注候选仓位</h4><p class="muted">${bankroll.small || "0.35% - 0.65%"}</p></div>
+          <div><h4>单日最大亏损</h4><p class="muted">${bankroll.max_daily_loss || (plan ? `约 ${Math.round(plan.max_loss)}` : "总资金 2% - 3%")}</p></div>
+        </div>
+        <div class="muted">淘汰赛主动模式：首发不作为分层条件；正EV更积极进入主推/小注；hard_ban、负EV、严重赔率异常仍直接拦截。比分只作参考。2/3球为当前淘汰赛重点观察区间。</div>
+      </section>
+      <section class="panel span-3 metric"><span>今日预算</span><strong>${plan ? Math.round(plan.daily_budget) : "-"}</strong><div class="muted">本金 ${plan ? Math.round(plan.bankroll) : "-"}</div></section>
+      <section class="panel span-3 metric"><span>最大亏损</span><strong>${plan ? Math.round(plan.max_loss) : "-"}</strong><div class="muted">触发后停止下注</div></section>
+      <section class="panel span-3 metric"><span>串关上限</span><strong>${plan ? Math.round(comboBudget) : "-"}</strong><div class="muted">${bankroll.combo || "不超过今日预算 20%-25%"}</div></section>
+      <section class="panel span-3 metric"><span>方案口径</span><strong>实战</strong><div class="muted">主推/小注/观察/禁买分层</div></section>
+      ${scorePriorCardHtml()}
       <section class="panel span-12 toolbar">
-        <button class="btn" data-action="refresh-recommend">刷新今日方案</button>
+        <button class="btn" data-action="refresh-today">重新生成今日方案</button>
+        <button class="btn secondary" data-action="refresh-core">刷新赔率并重算</button>
         <button class="btn secondary" data-action="freeze-rec">冻结赛前快照</button>
         <button class="btn secondary" data-view="review">赛后复盘入口</button>
-        <span class="muted">${plan.review_hint || ""}</span>
+        <span class="muted">${plan?.review_hint || "今日方案会自动读取最新赛前快照；没有 final snapshot 时使用最新快照并提示复查。"}</span>
       </section>
-      <section class="panel span-12"><h3>等首发/等赔率提示</h3><p class="muted">${plan.wait_notes?.length ? plan.wait_notes.join("；") : "暂无等待提示。"}</p></section>
-      <section class="panel span-12 table-panel"><h3>正式推荐</h3><p class="muted">${plan.singles?.length ? "通过当前风控的正式投注样本。" : "当前无通过风控的正式投注样本。"}</p><div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>方向</th><th>模型</th><th>赔率/EV</th><th>操作建议</th></tr></thead><tbody>${compactPickRows(plan.singles, "今日暂无通过风控的正式推荐。")}</tbody></table></div></section>
-      <section class="panel span-12 table-panel"><h3>小注候选</h3><p class="muted">小注候选仍受风控约束，不等于自动下注。</p><div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>方向</th><th>模型</th><th>赔率/EV</th><th>操作建议</th></tr></thead><tbody>${compactPickRows(plan.small_stake, "暂无小注候选。")}</tbody></table></div></section>
-      <section class="panel span-12 table-panel"><h3>策略观察</h3><p class="muted">模拟，不建议真实下注。</p><div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>方向</th><th>模型</th><th>赔率/EV</th><th>操作建议</th></tr></thead><tbody>${compactPickRows(plan.strategy_observation, "暂无策略观察候选。")}</tbody></table></div></section>
+      <section class="panel span-12"><h3>等赔率提示</h3><p class="muted">${plan?.wait_notes?.length ? plan.wait_notes.join("；") : "暂无等待提示。"}</p></section>
+      <section class="panel span-12 table-panel"><h3>今日主推</h3><div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>选择</th><th>模型</th><th>市场</th><th>赔率</th><th>EV</th><th>数据</th><th>建议仓位</th></tr></thead><tbody>${practicalRows(advice.main || [], "今日暂无主推。")}</tbody></table></div></section>
+      <section class="panel span-12 table-panel"><h3>小注候选</h3><p class="muted">小注候选仍受风控约束，不等于自动下注。</p><div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>选择</th><th>模型</th><th>市场</th><th>赔率</th><th>EV</th><th>数据</th><th>建议仓位</th></tr></thead><tbody>${practicalRows(advice.small || [], "暂无小注候选。")}</tbody></table></div></section>
+      <section class="panel span-12 table-panel"><h3>观察玩法</h3><div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>选择</th><th>模型</th><th>市场</th><th>赔率</th><th>EV</th><th>数据</th><th>原因</th></tr></thead><tbody>${practicalRows(advice.watch || [], "暂无观察玩法。")}</tbody></table></div></section>
+      <section class="panel span-12 table-panel"><h3>禁买清单</h3><div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>选择</th><th>模型</th><th>市场</th><th>赔率</th><th>EV</th><th>数据</th><th>禁买原因</th></tr></thead><tbody>${practicalRows(advice.banned || [], "暂无禁买清单。")}</tbody></table></div></section>
+      <section class="panel span-12 table-panel"><h3>比分参考</h3><p class="muted">比分波动大，仅供参考，不建议作为主买项。本系统按竞彩口径统计90分钟比分，加时和点球不计入比分先验。</p><div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>Top 3 比分</th><th>模型/先验/融合</th><th>形态</th><th>方向一致性</th><th>风险提示</th></tr></thead><tbody>${practicalScoreRows(advice.score_reference || [])}</tbody></table></div></section>
       ${paperTradingSummaryHtml()}
-      <section class="panel span-12 table-panel"><h3>二串一候选</h3><p class="muted">只从稳胆/让球稳胆里挑不同场次，总额不超过今日预算20%。</p><div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>方向</th><th>模型</th><th>赔率/EV</th><th>操作建议</th></tr></thead><tbody>${compactPickRows(plan.combos, "暂无合格二串一候选。")}</tbody></table></div></section>
-      <section class="panel span-6 table-panel"><h3>观察清单</h3><div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>方向</th><th>模型</th><th>赔率/EV</th><th>操作建议</th></tr></thead><tbody>${compactPickRows(plan.watch, "暂无观察项。")}</tbody></table></div></section>
-      <section class="panel span-6 table-panel"><h3>禁买清单</h3><div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>方向</th><th>模型</th><th>赔率/EV</th><th>操作建议</th></tr></thead><tbody>${compactPickRows(plan.banned, "暂无禁买项。")}</tbody></table></div></section>
+      <section class="panel span-12 table-panel"><h3>模型明细参考</h3><p class="muted">这里保留底层推荐明细，日常决策以本页上方分层为准。</p><div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>方向</th><th>推荐等级</th><th>模型概率</th><th>体彩去水</th><th>公平赔率</th><th>当前赔率</th><th>EV</th><th>数据</th><th>最终决策</th><th>操作</th></tr></thead><tbody>${recommendationDetailRows(40)}</tbody></table></div></section>
+    </div>
+  `;
+}
+
+function practicalRows(rows = [], emptyText = "暂无") {
+  if (!rows.length) {
+    return `<tr><td colspan="10" class="muted">${emptyText}</td></tr>`;
+  }
+  return rows.map(item => `
+    <tr>
+      <td>${item.match_time || "-"}</td>
+      <td><strong>${rankedMatchLabel(item.match_label || "")}</strong><div class="muted">${item.snapshot_note || ""}</div></td>
+      <td>${item.market || "-"}</td>
+      <td><strong>${item.pick || "-"}</strong></td>
+      <td>${pct(item.model_prob || 0)}</td>
+      <td>${pct(item.market_prob || 0)}</td>
+      <td>${odds(item.odds || 0)}</td>
+      <td class="${(item.ev || 0) >= 0 ? "down" : "up"}">${signedPct(item.ev || 0)}</td>
+      <td>${Number(item.data_score || 0).toFixed(0)}</td>
+      <td>${money(item.bankroll_suggestion || 0)}<div class="muted reason">${item.reason || ""}</div><div class="muted reason">${item.risk_tags || ""}</div></td>
+    </tr>
+  `).join("");
+}
+
+function practicalScoreRows(rows = []) {
+  if (!rows.length) {
+    return `<tr><td colspan="7" class="muted">暂无比分参考。</td></tr>`;
+  }
+  return rows.map(item => `
+    <tr>
+      <td>${item.match_time || "-"}</td>
+      <td><strong>${rankedMatchLabel(item.match_label || "")}</strong></td>
+      <td>${(item.scores || []).map(score => `<div><strong>${score.score}</strong> ${pct(score.adjusted_probability ?? score.probability ?? 0)}</div>`).join("") || "-"}</td>
+      <td>${(item.scores || []).map(score => `<div>模型 ${pct(score.model_probability ?? score.probability ?? 0)} · 先验 ${pct(score.prior_probability ?? 0)} · 权重 ${pct(score.prior_weight ?? 0)}</div>`).join("") || "-"}</td>
+      <td>${(item.scores || []).map(score => `<div>${score.is_extreme_score ? "极端比分" : score.is_high_frequency_shape ? "高频形态" : "普通形态"} · ${score.score_shape_key || "-"}</div>`).join("") || "-"}</td>
+      <td>${(item.scores || []).map(score => `<div>${score.spf_consistent ? "胜平负一致" : "胜平负不一致"} · ${score.total_goals_consistent ? "总进球一致" : "总进球不一致"}</div>`).join("") || "-"}</td>
+      <td class="muted">${(item.scores || []).map(score => `<div>${score.risk || ""}</div>`).join("") || item.reason || "比分波动大，仅供参考，不建议作为主买项。"}</td>
+    </tr>
+  `).join("");
+}
+
+function practicalAdviceHtml() {
+  const advice = state.practicalAdvice || {};
+  const bankroll = advice.bankroll_suggestion || {};
+  return `
+    <div class="grid">
+      <section class="panel span-12">
+        <h3>世界杯实战建议模式</h3>
+        <p class="muted">${advice.notice || "本页面为模型辅助决策，不保证盈利。请控制仓位。"}</p>
+        <div class="plan-grid">
+          <div><h4>策略状态</h4><p class="muted">${advice.strategy_status || "observation_only"} · hard_ban 最高优先级</p></div>
+          <div><h4>今日主推</h4><p class="muted">${bankroll.main || "0.75% - 1.25%"}</p></div>
+          <div><h4>小注候选</h4><p class="muted">${bankroll.small || "0.35% - 0.65%"}</p></div>
+          <div><h4>最大亏损</h4><p class="muted">${bankroll.max_daily_loss || "总资金 2% - 3%"}</p></div>
+        </div>
+        <div class="muted">淘汰赛主动模式：首发不作为分层条件，正EV方向更积极进入主推/小注；hard_ban、负EV、严重赔率异常仍直接拦截。比分波动大，仅供参考。</div>
+      </section>
+      ${scorePriorCardHtml()}
+      <section class="panel span-12 table-panel">
+        <h3>今日主推</h3>
+        <div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>选择</th><th>模型</th><th>市场</th><th>赔率</th><th>EV</th><th>数据</th><th>建议仓位</th></tr></thead><tbody>${practicalRows(advice.main || [], "今日暂无主推。")}</tbody></table></div>
+      </section>
+      <section class="panel span-12 table-panel">
+        <h3>小注候选</h3>
+        <div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>选择</th><th>模型</th><th>市场</th><th>赔率</th><th>EV</th><th>数据</th><th>建议仓位</th></tr></thead><tbody>${practicalRows(advice.small || [], "暂无小注候选。")}</tbody></table></div>
+      </section>
+      <section class="panel span-12 table-panel">
+        <h3>观察玩法</h3>
+        <div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>选择</th><th>模型</th><th>市场</th><th>赔率</th><th>EV</th><th>数据</th><th>原因</th></tr></thead><tbody>${practicalRows(advice.watch || [], "暂无观察玩法。")}</tbody></table></div>
+      </section>
+      <section class="panel span-12 table-panel">
+        <h3>禁买清单</h3>
+        <div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>选择</th><th>模型</th><th>市场</th><th>赔率</th><th>EV</th><th>数据</th><th>禁买原因</th></tr></thead><tbody>${practicalRows(advice.banned || [], "暂无禁买清单。")}</tbody></table></div>
+      </section>
+      <section class="panel span-12 table-panel">
+        <h3>比分参考</h3>
+        <p class="muted">比分波动大，仅供参考，不建议作为主买项。本系统按竞彩口径统计90分钟比分，加时和点球不计入比分先验。</p>
+        <div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>Top 3 比分</th><th>模型/先验/融合</th><th>形态</th><th>方向一致性</th><th>风险提示</th></tr></thead><tbody>${practicalScoreRows(advice.score_reference || [])}</tbody></table></div>
+      </section>
     </div>
   `;
 }
@@ -616,7 +1348,7 @@ function snapshotForMatch(matchId) {
 function snapshotRows() {
   const rows = state.matches || [];
   if (!rows.length) {
-    return `<tr><td colspan="13" class="muted">暂无比赛。先刷新核心数据。</td></tr>`;
+    return `<tr><td colspan="12" class="muted">暂无比赛。先刷新核心数据。</td></tr>`;
   }
   return rows.map(match => {
     const snap = snapshotForMatch(match.id);
@@ -634,7 +1366,6 @@ function snapshotRows() {
         <td>${oddsRow.odds ? odds(oddsRow.odds) : "-"}</td>
         <td>${evRow.ev == null ? "-" : signedPct(evRow.ev)}</td>
         <td>${snap ? `${Number(snap.data_quality_score || 0).toFixed(0)}分` : "-"}</td>
-        <td>${snap ? `${snap.lineup_status} / ${Number(snap.lineup_confidence || 0).toFixed(0)}` : "-"}</td>
         <td>${snap ? `${snap.injury_status} / ${Number(snap.injury_confidence || 0).toFixed(0)}` : "-"}</td>
         <td>${snap ? badge(snap.final_decision) : "-"}</td>
         <td>
@@ -642,6 +1373,33 @@ function snapshotRows() {
           ${snap ? `<button class="mini" data-action="mark-final-snapshot" data-snapshot-id="${snap.id}">标记最终</button>` : ""}
           ${snap ? `<button class="mini" data-action="settle-pre-snapshot" data-snapshot-id="${snap.id}">赛后结算</button>` : ""}
         </td>
+      </tr>
+    `;
+  }).join("");
+}
+
+function recommendationDetailRows(limit = 40) {
+  const rows = state.recommendations || [];
+  if (!rows.length) {
+    return `<tr><td colspan="13" class="muted">暂无模型明细。系统会自动刷新今日上下文，也可点击“刷新赔率并重算”。</td></tr>`;
+  }
+  return rows.slice(0, limit).map(item => {
+    const index = state.recommendations.indexOf(item);
+    return `
+      <tr>
+        <td>${item.match_time || "-"}</td>
+        <td><strong>${rankedMatchLabel(item.match_label)}</strong><div class="muted">${item.match_num || "-"}</div></td>
+        <td>${item.market}</td>
+        <td><strong>${item.pick}</strong></td>
+        <td>${badge(item.tier)}</td>
+        <td>${pct(item.model_prob)}</td>
+        <td>${pct(item.fair_prob)}</td>
+        <td>${odds(item.fair_odds)}</td>
+        <td>${odds(item.odds)}</td>
+        <td class="${(item.ev || 0) >= 0 ? "down" : "up"}">${signedPct(item.ev)}</td>
+        <td>${Number(item.data_quality_score || 0).toFixed(0)}</td>
+        <td>${badge(item.final_decision || item.decision)}</td>
+        <td><button class="mini" data-action="save-rec" data-index="${index}">存复盘</button></td>
       </tr>
     `;
   }).join("");
@@ -704,7 +1462,7 @@ function systemStatusHtml() {
         <div><h4>审计</h4><p class="muted">Critical ${status.audit_critical_count || 0} · Warning ${status.audit_warning_count || 0}</p></div>
       </div>
       <div class="plan-grid">
-        <div><h4>API-Football</h4><p class="muted">今日 ${status.api_football_today_requests || 0} / ${status.api_football_daily_limit || 100} · 剩余 ${status.api_football_remaining_requests ?? "-"}</p></div>
+        <div><h4>数据源策略</h4><p class="muted">使用体彩、football-data.org、The Odds API、StatsBomb 和自定义外部源</p></div>
         <div><h4>最近备份</h4><p class="muted">${lastBackup.created_at || "尚未备份"}</p></div>
         <div><h4>未结算</h4><p class="muted">${status.live_pre_match_unsettled_count || 0} 条</p></div>
         <div><h4>数据库路径</h4><p class="muted">${status.db_path || "-"}</p></div>
@@ -718,7 +1476,7 @@ function snapshotWorkflowHtml() {
     <section class="panel span-12">
       <h3>日常使用流程</h3>
       <div class="plan-grid">
-        ${["同步今日比赛", "生成赛前快照", "临近开赛同步首发/伤停", "标记 final snapshot", "比赛结束后结算", "查看 live_pre_match 纸面交易", "每天结束后备份数据"].map((step, index) => `
+        ${["同步今日比赛", "生成赛前快照", "临近开赛同步伤停/赔率", "标记 final snapshot", "比赛结束后结算", "查看 live_pre_match 纸面交易", "每天结束后备份数据"].map((step, index) => `
           <div><h4>${index + 1}. ${step}</h4><p class="muted">${index === 6 ? "导出 ZIP 和 CSV，不包含 API Key 明文。" : "保持赛前数据冻结，赛后只写结算表。"}</p></div>
         `).join("")}
       </div>
@@ -738,7 +1496,7 @@ function preMatchSnapshotHtml() {
     <div class="grid">
       <section class="panel span-12 toolbar">
         <button class="btn" data-action="create-today-pre-snapshots">批量生成今日快照</button>
-        <button class="btn secondary" data-action="refresh-external">同步 API-Football 数据</button>
+        <button class="btn secondary" data-action="refresh-external">全局刷新数据源</button>
         <button class="btn secondary" data-action="audit-pre-snapshots">运行快照审计</button>
         <button class="btn secondary" data-action="settle-all-pre-snapshots">赛后批量结算</button>
         <button class="btn secondary" data-action="export-app-data">导出全部数据</button>
@@ -755,7 +1513,7 @@ function preMatchSnapshotHtml() {
       <section class="panel span-3 metric"><span>快照数</span><strong>${snapshots.length}</strong><div class="muted">允许同场多快照</div></section>
       <section class="panel span-3 metric"><span>最终快照</span><strong>${snapshots.filter(item => item.is_final_pre_match).length}</strong><div class="muted">每场最多一个</div></section>
       <section class="panel span-3 metric"><span>纸面观察</span><strong>${paperCount}</strong><div class="muted">模拟，不建议真实下注</div></section>
-      <section class="panel span-3 metric"><span>数据提示</span><strong>保守</strong><div class="muted">首发/伤停缺失自动降级</div></section>
+      <section class="panel span-3 metric"><span>数据提示</span><strong>保守</strong><div class="muted">伤停、赔率、质量异常自动降级</div></section>
       <section class="panel span-3 metric"><span>审计问题</span><strong>${audits.filter(item => !item.resolved).length}</strong><div class="muted">Critical ${criticalCount} · Warning ${warningCount}</div></section>
       <section class="panel span-3 metric"><span>live 样本</span><strong>${live.sample_count || 0}</strong><div class="muted">已结算 ${live.settled_count || 0}</div></section>
       <section class="panel span-3 metric"><span>live 命中率</span><strong>${pct(live.hit_rate || 0)}</strong><div class="muted">${live.warning || "真实赛前纸面交易"}</div></section>
@@ -763,9 +1521,9 @@ function preMatchSnapshotHtml() {
       <section class="panel span-3 metric"><span>live 盈亏</span><strong>${signedPct(live.total_paper_profit || 0)}</strong><div class="muted">投入 ${Number(live.total_paper_stake || 0).toFixed(0)}</div></section>
       <section class="panel span-12">
         <h3>赛前快照中心</h3>
-        <p class="muted">首发/伤停数据未确认时，当前使用基础模型，相关玩法降级观察。以下为策略观察样本，仅用于模拟记录，不建议真实下注。</p>
+        <p class="muted">伤停或赔率数据未确认时，当前使用基础模型，相关玩法降级观察。以下为策略观察样本，仅用于模拟记录，不建议真实下注。</p>
         <div class="scroll-table">
-          <table><thead><tr><th>编号</th><th>开赛</th><th>比赛</th><th>快照时间</th><th>类型</th><th>模型概率</th><th>赔率</th><th>EV</th><th>数据</th><th>首发</th><th>伤停</th><th>决策</th><th>操作</th></tr></thead><tbody>${snapshotRows()}</tbody></table>
+          <table><thead><tr><th>编号</th><th>开赛</th><th>比赛</th><th>快照时间</th><th>类型</th><th>模型概率</th><th>赔率</th><th>EV</th><th>数据</th><th>伤停</th><th>决策</th><th>操作</th></tr></thead><tbody>${snapshotRows()}</tbody></table>
         </div>
       </section>
       <section class="panel span-12 table-panel">
@@ -837,6 +1595,17 @@ function bestProb(items = []) {
   return [...items].sort((a, b) => (b.probability || 0) - (a.probability || 0))[0] || null;
 }
 
+function analysisSaveButtons(matchIndex, group, sourceRows = [], rows = []) {
+  return rows.filter(Boolean).slice(0, group === "scores" ? 3 : 1).map((row) => {
+    const sourceIndex = Math.max(0, sourceRows.indexOf(row));
+    return `
+    <button class="mini" data-action="save-analysis" data-match-index="${matchIndex}" data-group="${group}" data-item-index="${sourceIndex}">
+      存${row.pick || "预测"}
+    </button>
+  `;
+  }).join("");
+}
+
 function predictionCenterHtml() {
   if (!state.analyses.length) {
     return `<section class="panel span-12 muted">暂无预测数据。先刷新核心数据，再点击刷新预测。</section>`;
@@ -845,9 +1614,9 @@ function predictionCenterHtml() {
     <div class="grid">
       <section class="panel span-12 toolbar">
         <button class="btn" data-action="refresh-analysis">刷新预测</button>
-        <span class="muted">这里只显示真实概率预测，不代表值得下注；下注请看“买球推荐”。</span>
+        <span class="muted">这里只显示真实概率预测，不代表值得下注；日常决策请看“今日方案”。</span>
       </section>
-      ${state.analyses.map(item => {
+      ${state.analyses.map((item, matchIndex) => {
         const had = bestProb(item.had);
         const hhad = bestProb(item.hhad);
         const ttg = bestProb(item.ttg);
@@ -867,6 +1636,12 @@ function predictionCenterHtml() {
               <div class="panel span-3 metric"><span>让球倾向</span><strong>${hhad?.pick || "-"}</strong><div class="muted">${hhad ? pct(hhad.probability) : "-"}</div></div>
               <div class="panel span-3 metric"><span>总进球</span><strong>${ttg?.pick || "-"}</strong><div class="muted">${ttg ? pct(ttg.probability) : "-"}</div></div>
               <div class="panel span-3 metric"><span>比分Top</span><strong>${score?.pick || "-"}</strong><div class="muted">${score ? pct(score.probability) : "-"}</div></div>
+            </div>
+            <div class="actions">
+              ${analysisSaveButtons(matchIndex, "had", item.had, [had])}
+              ${analysisSaveButtons(matchIndex, "hhad", item.hhad, [hhad])}
+              ${analysisSaveButtons(matchIndex, "ttg", item.ttg, [ttg])}
+              ${analysisSaveButtons(matchIndex, "scores", item.scores, [score])}
             </div>
             <p class="muted">${item.knockout_note}</p>
           </section>
@@ -953,7 +1728,7 @@ function modelStatusCard() {
       <div class="muted">世界杯修正层说明：${model.worldcup_correction_note || "只影响是否值得投注和推荐降级，不改写模型真实概率。"}</div>
       <div class="toolbar source-actions">
         <button class="btn" data-action="run-training-pipeline">自动下载训练数据并训练</button>
-        <span class="muted">${state.probeResult?.model ? `训练完成：${state.probeResult.model.model_version}` : "数据来自 Football-Data.co.uk CSV，API-Football 暂不参与历史训练。"}</span>
+        <span class="muted">${state.probeResult?.model ? `训练完成：${state.probeResult.model.model_version}` : "数据来自 Football-Data.co.uk CSV；实时链路已精简为有效数据源。"}</span>
       </div>
       <div class="muted">${globalModels.length ? `全局模型覆盖：${globalModels.join("；")}` : "当前只显示规则模型覆盖。"}</div>
       <div class="muted">${strategyRules.length ? `训练规则摘要：${strategyRules.join("；")}` : "暂无训练禁买规则摘要。"}</div>
@@ -1025,6 +1800,60 @@ function backtestRows() {
       <td>${Number(item.log_loss || 0).toFixed(3)}</td>
     </tr>
   `).join("");
+}
+
+function selectedAnalysis() {
+  if (!state.analyses.length) return null;
+  const selectedId = state.selectedAnalysisMatchId;
+  const selectedMatch = state.matches.find(match => match.id === selectedId);
+  if (selectedMatch) {
+    const label = `${rankedTeam(selectedMatch.home)} vs ${rankedTeam(selectedMatch.away)}`;
+    return state.analyses.find(item => rankedMatchLabel(item.match_label) === rankedMatchLabel(label))
+      || state.analyses.find(item => item.match_label.includes(selectedMatch.home) && item.match_label.includes(selectedMatch.away))
+      || state.analyses[0];
+  }
+  return state.analyses[0];
+}
+
+function singleMatchAnalysisHtml() {
+  const item = selectedAnalysis();
+  return `
+    <div class="grid">
+      <section class="panel span-12 toolbar">
+        <label>选择比赛
+          <select id="analysis-match">
+            ${state.matches.length ? state.matches.map((match, index) => `
+              <option value="${match.id}" ${(state.selectedAnalysisMatchId ? match.id === state.selectedAnalysisMatchId : index === 0) ? "selected" : ""}>${match.time || "-"} · ${match.match_num || "-"} · ${rankedTeam(match.home)} vs ${rankedTeam(match.away)}</option>
+            `).join("") : `<option value="">暂无比赛，请等待自动刷新</option>`}
+          </select>
+        </label>
+        <button class="btn" data-action="refresh-analysis">重新分析本场</button>
+        ${item ? `<button class="btn secondary" data-action="create-pre-snapshot" data-match-id="${state.selectedAnalysisMatchId || state.matches[0]?.id || item.match_id}">生成赛前快照</button>` : ""}
+        <span class="muted">选择比赛会自动读取最新模型概率、赔率、赛前快照和市场差异。</span>
+      </section>
+      ${item ? `
+        <section class="panel span-12 analysis-card">
+          <div class="card-head">
+            <div>
+              <h3>${rankedMatchLabel(item.match_label)}</h3>
+              <p>${item.match_num || "-"} · ${item.match_time || "-"}</p>
+            </div>
+            <span class="badge warn">淘汰赛90分钟</span>
+          </div>
+          <div class="plan-grid">
+            <div><h4>λ 主队</h4><p class="muted">${odds(item.lambda_home)}</p></div>
+            <div><h4>λ 客队</h4><p class="muted">${odds(item.lambda_away)}</p></div>
+            <div><h4>欧洲共识</h4><p class="muted">${item.europe_note}</p></div>
+            <div><h4>模型说明</h4><p class="muted">${item.knockout_note}</p></div>
+          </div>
+        </section>
+        <section class="panel span-6"><h3>胜平负</h3>${probMiniTable(item.had)}<div class="actions">${analysisSaveButtons(state.analyses.indexOf(item), "had", item.had, [bestProb(item.had)])}</div></section>
+        <section class="panel span-6"><h3>让球胜平负</h3>${probMiniTable(item.hhad)}<div class="actions">${analysisSaveButtons(state.analyses.indexOf(item), "hhad", item.hhad, [bestProb(item.hhad)])}</div></section>
+        <section class="panel span-6"><h3>总进球</h3>${probMiniTable(item.ttg)}<div class="actions">${analysisSaveButtons(state.analyses.indexOf(item), "ttg", item.ttg, [bestProb(item.ttg)])}</div></section>
+        <section class="panel span-6"><h3>比分 Top</h3>${probMiniTable(item.scores)}<div class="actions">${analysisSaveButtons(state.analyses.indexOf(item), "scores", item.scores, item.scores.slice(0, 3))}</div></section>
+      ` : `<section class="panel span-12 muted">暂无单场分析。系统会自动加载，也可点击重新分析。</section>`}
+    </div>
+  `;
 }
 
 function banRuleRows() {
@@ -1264,6 +2093,7 @@ function externalSourcesHtml() {
     </tr>
   `).join("");
   return `
+    ${dataRefreshProgressHtml()}
     <section class="panel span-12">
       <h3>免费数据源 Provider Registry</h3>
       <p class="muted">Key 只保存在本地设置中，页面不显示明文。网页抓取源只作为低可信补充，不当作官方强源。</p>
@@ -1380,10 +2210,11 @@ function simHtml() {
                   <th>欧洲共识</th>
                   <th>差值</th>
                 <th>公平/体彩赔率</th>
+                <th>复盘</th>
               </tr>
             </thead>
             <tbody>
-              ${(sim.market_rows || []).map(row => `
+              ${(sim.market_rows || []).map((row, index) => `
                 <tr>
                   <td><strong>${row.pick}</strong></td>
                   <td>${pct(row.model_prob)}</td>
@@ -1398,6 +2229,7 @@ function simHtml() {
                     <div>公平 ${odds(row.fair_odds)}</div>
                     <div class="muted">体彩 ${row.sporttery_odds == null ? "-" : odds(row.sporttery_odds)}</div>
                   </td>
+                  <td><button class="mini" data-action="save-sim" data-group="market" data-index="${index}">存复盘</button></td>
                 </tr>
               `).join("")}
             </tbody>
@@ -1414,14 +2246,14 @@ function simHtml() {
         <section class="panel span-12">
           <h3>总进球数概率</h3>
           <div class="score-grid compact">
-            ${(sim.total_goals || []).map(item => `<div class="score-card"><strong>${item.score}</strong><span>${pct(item.probability)}</span></div>`).join("")}
+            ${(sim.total_goals || []).map((item, index) => `<div class="score-card"><strong>${item.score}</strong><span>${pct(item.probability)}</span><button class="mini" data-action="save-sim" data-group="total" data-index="${index}">存复盘</button></div>`).join("")}
           </div>
           <p class="muted">来自本次蒙特卡洛真实模拟计数，7球及以上合并为7+球。</p>
         </section>
         <section class="panel span-12">
           <h3>比分 Top</h3>
           <div class="score-grid">
-            ${sim.top_scores.map(score => `<div class="score-card"><strong>${score.score}</strong><span>${pct(score.probability)}</span></div>`).join("")}
+            ${sim.top_scores.map((score, index) => `<div class="score-card"><strong>${score.score}</strong><span>${pct(score.probability)}</span><button class="mini" data-action="save-sim" data-group="score" data-index="${index}">存复盘</button></div>`).join("")}
           </div>
           <p class="muted">${sim.simulation_note || ""}</p>
           <p class="muted">${sim.source_note}</p>
@@ -1433,42 +2265,20 @@ function simHtml() {
 
 function viewHtml() {
   if (state.view === "dashboard") {
-    return `
-      <div class="grid">
-        <section class="panel span-12 toolbar">
-          <label>The Odds API Key
-            <input id="odds-key" type="password" placeholder="已内置，留空即可；填写则覆盖默认key">
-          </label>
-          <label>欧洲地区
-            <select id="odds-region"><option value="eu">EU</option><option value="uk">UK</option><option value="us">US</option><option value="au">AU</option></select>
-          </label>
-          <button class="btn" data-action="refresh-core">刷新核心数据</button>
-          <button class="btn secondary" data-action="refresh-xg">刷新 StatsBomb xG</button>
-        </section>
-        ${modelStatusCard()}
-        ${sourceCards()}
-        <section class="panel span-12">
-          <h3>比赛中心</h3>
-          <table><thead><tr><th>编号</th><th>时间</th><th>赛事</th><th>主队</th><th>客队</th><th>状态</th></tr></thead><tbody>${matchRows(40)}</tbody></table>
-        </section>
-      </div>
-    `;
+    state.view = "today";
+    return todayPlanHtml();
   }
   if (state.view === "prediction") return predictionCenterHtml();
   if (state.view === "match") {
-    return `
-      <div class="grid">
-        <section class="panel span-12 toolbar">
-          <button class="btn" data-action="refresh-analysis">刷新单场分析</button>
-          <span class="muted">这里显示模型修正后的胜平负、让球胜平负、总进球和比分概率。淘汰赛口径统一为90分钟。</span>
-        </section>
-        ${analysisCards()}
-      </div>
-    `;
+    return singleMatchAnalysisHtml();
   }
   if (state.view === "sim") return simHtml();
+  if (state.view === "upset") return upsetLabHtml();
   if (state.view === "today") return todayPlanHtml();
-  if (state.view === "snapshots") return preMatchSnapshotHtml();
+  if (state.view === "practical" || state.view === "snapshots" || state.view === "recommend" || state.view === "bankroll") {
+    state.view = "today";
+    return todayPlanHtml();
+  }
   if (state.view === "recommend") {
     const buyCount = state.recommendations.filter(item => item.decision === "可买").length;
     const watchCount = state.recommendations.filter(item => item.decision === "观察").length;
@@ -1571,6 +2381,15 @@ function viewHtml() {
         </div>
       </section>
       ${strategyDiagnosticsHtml()}
+      ${reviewSummaryHtml()}
+      ${dailyReviewSummaryHtml()}
+      <section class="panel table-panel">
+        <h3>盘口影响复盘</h3>
+        <p class="muted">按已结算复盘记录自动关联赛前赔率快照：降赔/升赔、最高最低、快照次数、最终赛果和盈亏，用来观察盘口变化对结果的影响。</p>
+        <div class="scroll-table">
+          <table><thead><tr><th>保存时间</th><th>比赛</th><th>比分</th><th>玩法</th><th>选择</th><th>初始赔率</th><th>当前赔率</th><th>最低/最高</th><th>方向</th><th>快照</th><th>异动</th><th>模型概率</th><th>命中</th><th>盈亏</th><th>解读</th></tr></thead><tbody>${oddsImpactRows()}</tbody></table>
+        </div>
+      </section>
       <section class="panel table-panel">
         <h3>历史回测分组</h3>
         <div class="scroll-table">
@@ -1583,7 +2402,7 @@ function viewHtml() {
           <table><thead><tr><th>维度</th><th>分组</th><th>样本</th><th>命中率</th><th>ROI</th><th>均赔</th><th>原因</th><th>操作</th></tr></thead><tbody>${banRuleRows()}</tbody></table>
         </div>
       </section>
-      <section class="panel table-panel"><h3>复盘中心</h3><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>选择</th><th>模型概率</th><th>赔率</th><th>概率差</th><th>仓位</th><th>决策</th><th>赛果</th><th>盈亏</th><th>操作</th></tr></thead><tbody>${predictionRows()}</tbody></table></section>
+      <section class="panel table-panel"><h3>复盘中心</h3>${settleSummaryHtml()}<table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>选择</th><th>模型概率</th><th>赔率</th><th>概率差</th><th>仓位</th><th>决策</th><th>赛果</th><th>盈亏</th><th>操作</th></tr></thead><tbody>${predictionRows()}</tbody></table></section>
     `;
   }
   if (state.view === "bankroll") {
@@ -1591,9 +2410,31 @@ function viewHtml() {
   }
   return `
     <div class="grid">
+      ${systemStatusHtml()}
       ${modelStatusCard()}
       ${sourceCards()}
       ${sourceHealthHtml()}
+      <section class="panel span-12 toolbar">
+        <button class="btn" data-action="create-today-pre-snapshots">批量生成今日快照</button>
+        <button class="btn secondary" data-action="audit-pre-snapshots">运行快照审计</button>
+        <button class="btn secondary" data-action="settle-all-pre-snapshots">赛后批量结算</button>
+        <button class="btn secondary" data-action="export-app-data">导出全部数据</button>
+        <button class="btn secondary" data-action="export-snapshots">导出赛前快照</button>
+        <button class="btn secondary" data-action="export-live-paper">导出纸面交易</button>
+        <button class="btn secondary" data-action="export-audit-logs">导出审计日志</button>
+        <button class="btn ghost" data-action="open-backup-dir">打开备份目录</button>
+        <span class="muted">数据源页集中维护 API、快照审计、备份导出；日常决策请看今日方案。</span>
+      </section>
+      <section class="panel span-12 table-panel">
+        <h3>赛前快照与审计</h3>
+        <div class="scroll-table">
+          <table><thead><tr><th>编号</th><th>开赛</th><th>比赛</th><th>快照时间</th><th>类型</th><th>模型概率</th><th>赔率</th><th>EV</th><th>数据</th><th>伤停</th><th>决策</th><th>操作</th></tr></thead><tbody>${snapshotRows()}</tbody></table>
+        </div>
+      </section>
+      <section class="panel span-12 table-panel">
+        <h3>快照质量审计</h3>
+        <div class="scroll-table"><table><thead><tr><th>比赛</th><th>快照时间</th><th>开赛时间</th><th>审计类型</th><th>严重程度</th><th>问题说明</th><th>状态</th></tr></thead><tbody>${auditRows()}</tbody></table></div>
+      </section>
       ${externalSourcesHtml()}
       <section class="panel span-12">
         <h3>本地数据库</h3>
@@ -1603,13 +2444,16 @@ function viewHtml() {
   `;
 }
 
-function render() {
+function render(options = {}) {
+  const preserveScroll = options.preserveScroll !== false;
+  const previousContent = document.querySelector(".content");
+  const previousScrollTop = preserveScroll && renderedView === state.view ? previousContent?.scrollTop || 0 : 0;
   document.querySelector("#app").innerHTML = `
     <div class="app">
       <aside class="sidebar">
         <div class="brand">
-          <h1>世界杯盈利模型</h1>
-          <p>本地缓存 · 模拟对决 · 安全边际</p>
+          <h1>世界杯决策工作台</h1>
+          <p>今日方案 · 概率分析 · 复盘闭环</p>
         </div>
         <nav class="nav">
           ${views.map(([id, label]) => `<button class="${state.view === id ? "active" : ""}" data-view="${id}">${label}</button>`).join("")}
@@ -1620,16 +2464,27 @@ function render() {
         <div class="topbar">
           <div>
             <h2>${views.find(([id]) => id === state.view)?.[1]}</h2>
-            <p>${state.busy ? "后台任务运行中，界面仍可浏览。" : "本地缓存、稳健推荐、异动记录、模拟对决。"}</p>
+            <p>${state.busy ? "后台任务运行中，界面仍可浏览。" : pageDescription()}</p>
           </div>
           <div class="actions">
-            <button class="btn ghost" data-action="reload">刷新状态</button>
+            <button class="btn ghost" data-action="refresh-current-view">同步当前页</button>
+            <button class="btn secondary" data-action="refresh-external">全局刷新</button>
           </div>
         </div>
+        ${refreshStatusHtml()}
+        ${state.busy && state.dataRefreshProgress ? dataRefreshProgressHtml(true) : ""}
         ${viewHtml()}
       </main>
     </div>
   `;
+  const content = document.querySelector(".content");
+  if (content) {
+    content.scrollTop = previousScrollTop;
+    requestAnimationFrame(() => {
+      content.scrollTop = previousScrollTop;
+    });
+  }
+  renderedView = state.view;
 }
 
 document.addEventListener("click", event => {
@@ -1637,15 +2492,21 @@ document.addEventListener("click", event => {
   const action = event.target?.dataset?.action;
   if (view) {
     state.view = view;
-    render();
+    render({ preserveScroll: false });
+    refreshViewContext(view, "切页").then(() => {
+      if (state.view === view) render();
+    }).catch(error => {
+      state.message = error?.message || String(error);
+      render();
+    });
   }
   if (action === "reload") safeRun("刷新状态", loadStatus);
+  if (action === "refresh-current-view") safeRun("同步当前页", async () => refreshViewContext(state.view, "手动", true));
+  if (action === "refresh-today") safeRun("重新生成今日方案", async () => refreshTodayContext("手动"));
   if (action === "refresh-core") safeRun("刷新核心数据", refreshCore);
   if (action === "refresh-xg") safeRun("刷新 StatsBomb xG", refreshXg);
   if (action === "refresh-results") safeRun("刷新赛果", async () => {
-    await refreshResults();
-    state.diagnostics = await api.invokeCommand("model_diagnostics");
-    state.backtest = await api.invokeCommand("backtest_report");
+    await refreshResultsAndSettle("手动");
   });
   if (action === "import-historical") safeRun("导入历史样本", importHistoricalResults);
   if (action === "import-player-status") safeRun("导入球员状态", importPlayerStatus);
@@ -1668,11 +2529,15 @@ document.addEventListener("click", event => {
   if (action === "refresh-recommend") safeRun("生成推荐", async () => {
     state.recommendations = await api.invokeCommand("list_recommendations");
     state.todayPlan = await api.invokeCommand("today_bet_plan");
+    state.practicalAdvice = await api.invokeCommand("worldcup_practical_advice");
+    markRefresh("lastTodayAt", "今日方案已更新", "手动");
   });
   if (action === "refresh-analysis") safeRun("刷新单场分析", async () => {
     state.analyses = await api.invokeCommand("list_match_analyses");
   });
   if (action === "save-rec") safeRun("保存复盘", async () => saveRecommendation(event.target.dataset.index));
+  if (action === "save-analysis") safeRun("保存预测复盘", async () => saveAnalysisReview(event.target.dataset.matchIndex, event.target.dataset.group, event.target.dataset.itemIndex));
+  if (action === "save-sim") safeRun("保存模拟复盘", async () => saveSimulationReview(event.target.dataset.group, event.target.dataset.index));
   if (action === "freeze-rec") safeRun("冻结赛前快照", freezeRecommendations);
   if (action === "collect-worldcup-snapshot") safeRun("赛前闭环采集", collectWorldcupSnapshot);
   if (action === "create-pre-snapshot") safeRun("生成当前快照", async () => createPreMatchSnapshot(event.target.dataset.matchId));
@@ -1691,6 +2556,9 @@ document.addEventListener("click", event => {
   if (action === "settle-bet-recs") safeRun("结算推荐样本", settleBetRecommendations);
   if (action === "export-worldcup-samples") safeRun("导出训练样本", exportWorldcupSamples);
   if (action === "run-worldcup-cycle") safeRun("执行世界杯闭环", runWorldcupClosureCycle);
+  if (action === "generate-upset-lab") safeRun("生成冷门候选", refreshUpsetLab);
+  if (action === "create-upset-paper") safeRun("写入冷门纸面交易", createUpsetPaperTrades);
+  if (action === "settle-upset-paper") safeRun("结算冷门纸面交易", settleUpsetPaperTrades);
   if (action === "delete-prediction") safeRun("删除复盘", async () => deletePrediction(event.target.dataset.id));
   if (action === "settle-hit") safeRun("结算命中", async () => settlePrediction(event.target.dataset.id, true));
   if (action === "settle-miss") safeRun("结算未中", async () => settlePrediction(event.target.dataset.id, false));
@@ -1701,7 +2569,11 @@ document.addEventListener("click", event => {
   if (action === "probe-injury") safeRun("测试伤停源", async () => probeExternal(document.querySelector("#injury-url")?.value || ""));
   if (action === "probe-lineup") safeRun("测试首发源", async () => probeExternal(document.querySelector("#lineup-url")?.value || ""));
   if (action === "probe-stats") safeRun("测试统计源", async () => probeExternal(document.querySelector("#stats-url")?.value || ""));
-  if (action === "save-provider-key") safeRun("保存 Provider Key", async () => saveProviderCredential(event.target.dataset.provider));
+  if (action === "save-provider-key") {
+    const providerId = event.target.dataset.provider;
+    const apiKey = document.querySelector(`#provider-key-${providerId}`)?.value || "";
+    safeRun("保存 Provider Key", async () => saveProviderCredential(providerId, apiKey));
+  }
   if (action === "clear-provider-key") safeRun("清除 Provider Key", async () => clearProviderCredential(event.target.dataset.provider));
   if (action === "test-provider") safeRun("测试 Provider", async () => testProvider(event.target.dataset.provider));
   if (action === "toggle-provider") safeRun("切换 Provider", async () => toggleProvider(event.target.dataset.provider, event.target.dataset.enabled === "true"));
@@ -1725,6 +2597,11 @@ document.addEventListener("change", event => {
       render();
     }
   }
+  if (event.target?.id === "analysis-match") {
+    state.selectedAnalysisMatchId = event.target.value;
+    refreshPredictionContext("切换比赛").then(() => render()).catch(() => render());
+    render();
+  }
 });
 
 function setupAutoRefresh() {
@@ -1732,12 +2609,34 @@ function setupAutoRefresh() {
     clearInterval(state.autoRefreshTimer);
     state.autoRefreshTimer = null;
   }
-  const minutes = Number(state.bankroll?.auto_refresh_minutes || 0);
-  if (minutes > 0) {
-    state.autoRefreshTimer = setInterval(() => {
-      refreshCore().catch(() => {});
-    }, minutes * 60 * 1000);
+  if (state.resultRefreshTimer) {
+    clearInterval(state.resultRefreshTimer);
+    state.resultRefreshTimer = null;
   }
+  if (state.healthRefreshTimer) {
+    clearInterval(state.healthRefreshTimer);
+    state.healthRefreshTimer = null;
+  }
+  const minutes = Number(state.bankroll?.auto_refresh_minutes || 5);
+  const todayMs = Math.max(2, minutes) * 60 * 1000;
+  state.autoRefreshTimer = setInterval(() => {
+    if (document.hidden) return;
+    refreshOddsContext("定时").then(() => {
+      if (["today", "prediction", "movements"].includes(state.view)) render();
+    }).catch(() => {});
+  }, todayMs);
+  state.resultRefreshTimer = setInterval(() => {
+    if (document.hidden) return;
+    refreshResultsAndSettle("定时").then(() => {
+      if (["results", "review", "today"].includes(state.view)) render();
+    }).catch(() => {});
+  }, 10 * 60 * 1000);
+  state.healthRefreshTimer = setInterval(() => {
+    if (document.hidden) return;
+    refreshDataHealth("定时").then(() => {
+      if (state.view === "sources") render();
+    }).catch(() => {});
+  }, 5 * 60 * 1000);
 }
 
 listen("simulation-progress", event => {
@@ -1747,7 +2646,14 @@ listen("simulation-progress", event => {
   }
 }).catch(() => {});
 
+listen("data-source-refresh-progress", event => {
+  state.dataRefreshProgress = event.payload;
+  render();
+}).catch(() => {});
+
 safeRun("初始化", async () => {
   await loadStatus();
+  await refreshTodayContext("启动");
+  await refreshResultsAndSettle("启动");
   setupAutoRefresh();
 });
