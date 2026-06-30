@@ -26,7 +26,7 @@ use crate::services::source_service::{
     source_health_label_for, source_is_optional,
 };
 use anyhow::Context;
-use chrono::Utc;
+use chrono::{DateTime, NaiveDateTime, Utc};
 use rand::Rng;
 use rusqlite::types::ValueRef;
 use rusqlite::{params, Connection};
@@ -6783,15 +6783,38 @@ fn parse_json_text(text: String) -> Value {
     serde_json::from_str(&text).unwrap_or(Value::Null)
 }
 
-fn kickoff_is_future(kickoff_time: &str, snapshot_time: &str) -> bool {
-    if kickoff_time.is_empty() {
-        return false;
+fn parse_time_as_utc(value: &str) -> Option<DateTime<Utc>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
     }
-    kickoff_time >= snapshot_time
+    DateTime::parse_from_rfc3339(trimmed)
+        .map(|dt| dt.with_timezone(&Utc))
+        .ok()
+        .or_else(|| {
+            NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S")
+                .ok()
+                .map(|dt| DateTime::from_naive_utc_and_offset(dt, Utc))
+        })
+        .or_else(|| {
+            NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S")
+                .ok()
+                .map(|dt| DateTime::from_naive_utc_and_offset(dt, Utc))
+        })
+}
+
+fn kickoff_is_future(kickoff_time: &str, snapshot_time: &str) -> bool {
+    match (
+        parse_time_as_utc(kickoff_time),
+        parse_time_as_utc(snapshot_time),
+    ) {
+        (Some(kickoff), Some(snapshot)) => snapshot < kickoff,
+        _ => false,
+    }
 }
 
 fn pre_match_snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PreMatchSnapshotRow> {
-    let settlement_text: Option<String> = row.get(33)?;
+    let settlement_text: Option<String> = row.get(34)?;
     Ok(PreMatchSnapshotRow {
         id: row.get(0)?,
         match_id: row.get(1)?,
@@ -6822,9 +6845,10 @@ fn pre_match_snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PreM
         paper_strategy_id: row.get(26)?,
         paper_trade_enabled: row.get::<_, i64>(27)? != 0,
         raw_features_json: parse_json_text(row.get(28)?),
-        is_final_pre_match: row.get::<_, i64>(29)? != 0,
-        created_at: row.get(30)?,
-        updated_at: row.get(31)?,
+        created_before_kickoff: row.get::<_, i64>(29)? != 0,
+        is_final_pre_match: row.get::<_, i64>(30)? != 0,
+        created_at: row.get(31)?,
+        updated_at: row.get(32)?,
         settlement: settlement_text.map(parse_json_text),
     })
 }
@@ -6837,7 +6861,7 @@ fn pre_match_snapshot_select_sql(where_clause: &str) -> String {
                 s.odds_json, s.market_probs_json, s.ev_json, s.data_quality_score,
                 s.lineup_status, s.lineup_confidence, s.injury_status, s.injury_confidence,
                 s.risk_tags_json, s.final_decision, s.decision_reason_json, s.paper_strategy_id,
-                s.paper_trade_enabled, s.raw_features_json, s.is_final_pre_match, s.created_at, s.updated_at,
+                s.paper_trade_enabled, s.raw_features_json, s.created_before_kickoff, s.is_final_pre_match, s.created_at, s.updated_at,
                 (select json_object('home_score', r.home_score, 'away_score', r.away_score, 'result_spf', r.result_spf,
                                     'total_goals', r.total_goals, 'settled_at', r.settled_at,
                                     'is_hit_json', r.is_hit_json, 'paper_profit_json', r.paper_profit_json,
@@ -6852,26 +6876,44 @@ fn pre_match_snapshot_select_sql(where_clause: &str) -> String {
 async fn create_pre_match_snapshot(app: AppHandle, match_id: String) -> Result<Value, String> {
     let recommendations = list_recommendations(app.clone()).await.unwrap_or_default();
     let matches = list_matches(app.clone()).await.unwrap_or_default();
-    let target_teams = match_teams_for_id(&matches, &match_id);
+    let target_match = matches.iter().find(|item| item.id == match_id).cloned();
+    let target_teams = target_match
+        .as_ref()
+        .map(|item| (item.home.clone(), item.away.clone()))
+        .or_else(|| match_teams_for_id(&matches, &match_id));
     let items = recommendations
         .into_iter()
         .filter(|item| recommendation_matches_target(item, &match_id, target_teams.as_ref()))
         .collect::<Vec<_>>();
-    let Some(first) = items.first() else {
-        let label = target_teams
-            .map(|(home, away)| format!("{} vs {}", home, away))
-            .unwrap_or_else(|| match_id.clone());
+    if target_match.is_none() && items.is_empty() {
+        return Err(format!("match_id 不存在：{}，请先同步今日比赛。", match_id));
+    }
+    let fallback_match = target_match.clone().unwrap_or_else(|| {
+        let first = items.first().expect("items checked above");
+        let mut parts = first.match_label.split(" vs ");
+        MatchRow {
+            id: first.match_id.clone(),
+            match_num: first.match_num.clone(),
+            league: "世界杯".to_string(),
+            time: first.match_time.clone(),
+            home: parts.next().unwrap_or("").to_string(),
+            away: parts.next().unwrap_or("").to_string(),
+            status: "赛前".to_string(),
+        }
+    });
+    if fallback_match.time.trim().is_empty() {
         return Err(format!(
-            "未找到 {} 的推荐/赔率数据，请先点“刷新核心数据”或“全局刷新数据源”。",
-            label
+            "{} 缺少 kickoff_time，不能生成赛前快照。",
+            match_id
         ));
     };
     let conn = open_conn(&app)?;
     let now = Utc::now().to_rfc3339();
-    let external_fixture_id = first.match_id.clone();
-    let competition = first.market.clone();
+    let created_before_kickoff = kickoff_is_future(&fallback_match.time, &now);
+    let external_fixture_id = fallback_match.id.clone();
+    let competition = fallback_match.league.clone();
     let season = "2026".to_string();
-    let stage = "赛前".to_string();
+    let stage = fallback_match.status.clone();
     let injury_cache = cache_get(&conn, "injury_data").map_err(|error| error.to_string())?;
     let injury_status = if injury_cache.is_some() {
         "available"
@@ -6880,17 +6922,46 @@ async fn create_pre_match_snapshot(app: AppHandle, match_id: String) -> Result<V
     }
     .to_string();
     let injury_confidence = if injury_cache.is_some() { 78.0 } else { 35.0 };
-    let mut data_quality = items.iter().map(|item| item.data_score).fold(0.0, f64::max);
+    let mut data_quality = if items.is_empty() {
+        50.0
+    } else {
+        items.iter().map(|item| item.data_score).fold(0.0, f64::max)
+    };
     let mut risk_tags = Vec::new();
+    if !created_before_kickoff {
+        data_quality = data_quality.min(45.0);
+        risk_tags.push("snapshot_after_kickoff");
+    }
+    if items.is_empty() {
+        risk_tags.push("missing_model_probs");
+        risk_tags.push("missing_odds");
+        data_quality = data_quality.min(50.0);
+    }
     if injury_status == "unknown" {
         data_quality = data_quality.min(72.0);
         risk_tags.push("伤停未知");
     }
+    let has_odds = items.iter().any(|item| item.odds > 0.0);
+    if !has_odds {
+        data_quality = data_quality.min(58.0);
+        risk_tags.push("missing_odds");
+    }
+    let has_model_probs = items.iter().any(|item| item.model_prob > 0.0);
+    if !has_model_probs {
+        data_quality = data_quality.min(55.0);
+        risk_tags.push("missing_model_probs");
+    }
     if data_quality < 65.0 {
         risk_tags.push("数据质量低于65，只能观察");
     }
+    risk_tags.sort();
+    risk_tags.dedup();
     let final_decision = if items.iter().any(|item| item.final_decision == "hard_ban") {
         "hard_ban"
+    } else if !has_odds {
+        "wait_for_odds"
+    } else if !has_model_probs || !created_before_kickoff {
+        "observe_only"
     } else if data_quality < 65.0 {
         "observe_only"
     } else {
@@ -6901,7 +6972,8 @@ async fn create_pre_match_snapshot(app: AppHandle, match_id: String) -> Result<V
             .unwrap_or("observe_only")
     }
     .to_string();
-    let paper_trade_enabled = kickoff_is_future(&first.match_time, &now)
+    let paper_trade_enabled = created_before_kickoff
+        && has_odds
         && items
             .iter()
             .any(|item| item.final_decision == "observe_only" && item.expected_return > 0.0);
@@ -6917,6 +6989,11 @@ async fn create_pre_match_snapshot(app: AppHandle, match_id: String) -> Result<V
     let ev_payload = json!(items.iter().map(|item| json!({
         "market": item.market, "pick": item.pick, "ev": item.expected_return, "advantage_rate": item.advantage_rate
     })).collect::<Vec<_>>());
+    let ev_storage = if has_odds {
+        ev_payload.clone()
+    } else {
+        Value::Null
+    };
     let reasons = json!(items
         .iter()
         .map(|item| json!({
@@ -6924,24 +7001,28 @@ async fn create_pre_match_snapshot(app: AppHandle, match_id: String) -> Result<V
             "reason": item.reason, "risk": item.risk_factors, "support": item.support_factors
         }))
         .collect::<Vec<_>>());
+    let home_team = fallback_match.home.clone();
+    let away_team = fallback_match.away.clone();
+    let worldcup_correction_action = items
+        .first()
+        .map(|item| item.worldcup_correction_action.clone())
+        .unwrap_or_else(|| "none".to_string());
+    let lineup_status = items
+        .first()
+        .map(|item| item.lineup_status.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let lineup_confidence = items
+        .first()
+        .map(|item| item.lineup_confidence)
+        .unwrap_or(0.0);
     let raw_features = json!({
-        "lineup_status": first.lineup_status,
-        "lineup_confidence": first.lineup_confidence,
+        "lineup_status": lineup_status,
+        "lineup_confidence": lineup_confidence,
         "injury_status": injury_status,
-        "source": "live_pre_match_snapshot_v1"
+        "source": "live_pre_match_snapshot_v1",
+        "created_before_kickoff": created_before_kickoff,
+        "missing_fields": risk_tags.clone()
     });
-    let home_team = first
-        .match_label
-        .split(" vs ")
-        .next()
-        .unwrap_or("")
-        .to_string();
-    let away_team = first
-        .match_label
-        .split(" vs ")
-        .nth(1)
-        .unwrap_or("")
-        .to_string();
     conn.execute(
         "insert into pre_match_snapshots(
           match_id, external_fixture_id, provider_match_id, snapshot_time, kickoff_time, home_team, away_team,
@@ -6949,14 +7030,14 @@ async fn create_pre_match_snapshot(app: AppHandle, match_id: String) -> Result<V
           worldcup_correction_action, odds_json, market_probs_json, ev_json, data_quality_score,
           lineup_status, lineup_confidence, injury_status, injury_confidence, risk_tags_json,
           final_decision, decision_reason_json, paper_strategy_id, paper_trade_enabled, raw_features_json,
-          is_final_pre_match, created_at, updated_at
-        ) values (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,0,?29,?30)",
+          created_before_kickoff, is_final_pre_match, created_at, updated_at
+        ) values (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,0,?30,?31)",
         params![
-            first.match_id,
+            fallback_match.id,
             external_fixture_id,
-            first.match_id,
+            fallback_match.id,
             now,
-            first.match_time,
+            fallback_match.time,
             home_team,
             away_team,
             competition,
@@ -6965,13 +7046,13 @@ async fn create_pre_match_snapshot(app: AppHandle, match_id: String) -> Result<V
             "live-pre-match-v1",
             model_probs.to_string(),
             model_probs.to_string(),
-            first.worldcup_correction_action,
+            worldcup_correction_action,
             odds_payload.to_string(),
             market_probs.to_string(),
-            ev_payload.to_string(),
+            ev_storage.to_string(),
             data_quality,
-            first.lineup_status,
-            first.lineup_confidence,
+            lineup_status,
+            lineup_confidence,
             injury_status,
             injury_confidence,
             json!(risk_tags).to_string(),
@@ -6980,6 +7061,7 @@ async fn create_pre_match_snapshot(app: AppHandle, match_id: String) -> Result<V
             "candidate_strategy_v1",
             if paper_trade_enabled { 1 } else { 0 },
             raw_features.to_string(),
+            if created_before_kickoff { 1 } else { 0 },
             now,
             now,
         ],
@@ -7012,32 +7094,63 @@ async fn create_pre_match_snapshot(app: AppHandle, match_id: String) -> Result<V
             }
         }
     }
+    let sql = pre_match_snapshot_select_sql("where s.id=?1");
+    let snapshot = conn
+        .prepare(&sql)
+        .and_then(|mut stmt| stmt.query_row(params![snapshot_id], pre_match_snapshot_from_row))
+        .map_err(|error| error.to_string())?;
     Ok(json!({
         "ok": true,
         "snapshot_id": snapshot_id,
-        "match_id": first.match_id,
+        "match_id": snapshot.match_id,
         "paper_trade_enabled": paper_trade_enabled,
         "final_decision": final_decision,
-        "data_quality_score": data_quality
+        "created_before_kickoff": created_before_kickoff,
+        "missing_odds": !has_odds,
+        "missing_model_probs": !has_model_probs,
+        "data_quality_score": data_quality,
+        "snapshot": snapshot
     }))
 }
 
 #[tauri::command]
 async fn create_today_pre_match_snapshots(app: AppHandle) -> Result<Value, String> {
     let matches = list_matches(app.clone()).await?;
+    if matches.is_empty() {
+        return Err("今日比赛为空，请先同步比赛。".to_string());
+    }
     let mut created = Vec::new();
     let mut errors = Vec::new();
+    let total_matches = matches.len();
     for item in matches {
         match create_pre_match_snapshot(app.clone(), item.id.clone()).await {
-            Ok(value) => created.push(value),
-            Err(error) => errors.push(json!({ "match_id": item.id, "error": error })),
+            Ok(value) => created.push(json!({
+                "match_id": item.id,
+                "match_label": format!("{} vs {}", item.home, item.away),
+                "status": "created",
+                "result": value
+            })),
+            Err(error) => errors.push(json!({
+                "match_id": item.id,
+                "match_label": format!("{} vs {}", item.home, item.away),
+                "status": "failed",
+                "error": error
+            })),
         }
     }
-    Ok(json!({ "ok": true, "created": created.len(), "snapshots": created, "errors": errors }))
+    Ok(json!({
+        "ok": true,
+        "total_matches": total_matches,
+        "created_count": created.len(),
+        "skipped_count": 0,
+        "failed_count": errors.len(),
+        "per_match_results": created.iter().chain(errors.iter()).cloned().collect::<Vec<_>>(),
+        "snapshots": created,
+        "errors": errors
+    }))
 }
 
-#[tauri::command]
-async fn get_pre_match_snapshots(app: AppHandle) -> Result<Vec<PreMatchSnapshotRow>, String> {
+async fn load_pre_match_snapshots(app: AppHandle) -> Result<Vec<PreMatchSnapshotRow>, String> {
     let conn = open_conn(&app)?;
     let sql = pre_match_snapshot_select_sql("");
     let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
@@ -7046,6 +7159,31 @@ async fn get_pre_match_snapshots(app: AppHandle) -> Result<Vec<PreMatchSnapshotR
         .map_err(|error| error.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn get_pre_match_snapshots(
+    app: AppHandle,
+    date: Option<String>,
+    match_id: Option<String>,
+    final_only: Option<bool>,
+) -> Result<Vec<PreMatchSnapshotRow>, String> {
+    let rows = load_pre_match_snapshots(app).await?;
+    Ok(rows
+        .into_iter()
+        .filter(|snapshot| {
+            date.as_ref()
+                .map(|value| snapshot.kickoff_time.starts_with(value))
+                .unwrap_or(true)
+        })
+        .filter(|snapshot| {
+            match_id
+                .as_ref()
+                .map(|value| snapshot.match_id == *value)
+                .unwrap_or(true)
+        })
+        .filter(|snapshot| !final_only.unwrap_or(false) || snapshot.is_final_pre_match)
+        .collect())
 }
 
 #[tauri::command]
@@ -7066,13 +7204,20 @@ async fn get_match_snapshot_history(
 #[tauri::command]
 async fn mark_final_pre_match_snapshot(app: AppHandle, snapshot_id: i64) -> Result<Value, String> {
     let conn = open_conn(&app)?;
-    let match_id: String = conn
+    let (match_id, created_before_kickoff): (String, bool) = conn
         .query_row(
-            "select match_id from pre_match_snapshots where id=?1",
+            "select match_id, created_before_kickoff from pre_match_snapshots where id=?1",
             params![snapshot_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0)),
         )
         .map_err(|error| error.to_string())?;
+    let previous_final_snapshot_id: Option<i64> = conn
+        .query_row(
+            "select id from pre_match_snapshots where match_id=?1 and is_final_pre_match=1 limit 1",
+            params![match_id],
+            |row| row.get(0),
+        )
+        .ok();
     conn.execute(
         "update pre_match_snapshots set is_final_pre_match=0 where match_id=?1",
         params![match_id],
@@ -7084,13 +7229,28 @@ async fn mark_final_pre_match_snapshot(app: AppHandle, snapshot_id: i64) -> Resu
         params![snapshot_id, now],
     )
     .map_err(|error| error.to_string())?;
-    conn.execute("update paper_trading_records set is_final_snapshot=case when snapshot_id=?1 then 1 else 0 end where match_id=?2", params![snapshot_id, match_id]).map_err(|error| error.to_string())?;
+    conn.execute("update paper_trading_records set is_final_snapshot=case when snapshot_id=?1 and created_before_kickoff=1 then 1 else 0 end where match_id=?2", params![snapshot_id, match_id]).map_err(|error| error.to_string())?;
     conn.execute(
         "insert into snapshot_audit_logs(snapshot_id, match_id, audit_type, severity, message, detected_at, resolved)
          values(?1,?2,'final_snapshot_marked','info','已标记新的最终赛前快照，并自动取消同场旧 final。',?3,1)",
         params![snapshot_id, match_id, now],
     ).map_err(|error| error.to_string())?;
-    Ok(json!({ "ok": true, "snapshot_id": snapshot_id, "match_id": match_id }))
+    let warning = if created_before_kickoff {
+        ""
+    } else {
+        "该快照生成时间晚于开赛时间，不能作为真实赛前 final。"
+    };
+    Ok(json!({
+        "ok": true,
+        "current_final_snapshot_id": snapshot_id,
+        "previous_final_snapshot_id": previous_final_snapshot_id,
+        "changed": previous_final_snapshot_id != Some(snapshot_id),
+        "snapshot_id": snapshot_id,
+        "match_id": match_id,
+        "created_before_kickoff": created_before_kickoff,
+        "live_pre_match_final": created_before_kickoff,
+        "warning": warning
+    }))
 }
 
 fn spf_from_score(home_score: i64, away_score: i64) -> &'static str {
@@ -7121,17 +7281,25 @@ async fn settle_pre_match_snapshot(
     let result_spf = spf_from_score(home_score, away_score).to_string();
     let total_goals = home_score + away_score;
     let odds_items = parse_json_text(odds_text);
+    let result = MatchResult {
+        home: String::new(),
+        away: String::new(),
+        score: format!("{}:{}", home_score, away_score),
+        half_score: String::new(),
+        stage: String::new(),
+        status: "settled_90min".to_string(),
+    };
     let mut is_hit = serde_json::Map::new();
     let mut paper_profit = serde_json::Map::new();
     for item in odds_items.as_array().into_iter().flatten() {
         let market = item.get("market").and_then(Value::as_str).unwrap_or("");
         let pick = item.get("pick").and_then(Value::as_str).unwrap_or("");
         let odds = item.get("odds").and_then(Value::as_f64).unwrap_or(0.0);
-        if market.starts_with("体彩HAD") || market.contains("HAD") {
-            let hit = pick == result_spf;
+        if let Some((hit, actual)) = pick_hit_from_result(market, pick, &result) {
             let key = format!("{}:{}", market, pick);
             is_hit.insert(key.clone(), json!(hit));
-            paper_profit.insert(key, json!(if hit { odds - 1.0 } else { -1.0 }));
+            paper_profit.insert(key.clone(), json!(if hit { odds - 1.0 } else { -1.0 }));
+            is_hit.insert(format!("{}:actual", key), json!(actual));
         }
     }
     let now = Utc::now().to_rfc3339();
@@ -7140,24 +7308,39 @@ async fn settle_pre_match_snapshot(
          values(?1,?2,?3,?4,?5,?6,?7,?8,?9,'settled')",
         params![snapshot_id, match_id, home_score, away_score, result_spf, total_goals, now, Value::Object(is_hit).to_string(), Value::Object(paper_profit).to_string()],
     ).map_err(|error| error.to_string())?;
-    conn.execute(
-        "update paper_trading_records
-         set result_status='settled',
-             is_hit=case
-               when selection=?2 then 1
-               when play_type like '%HAD%' then 0
-               else is_hit
-             end,
-             paper_profit=case
-               when selection=?2 then odds - paper_stake
-               when play_type like '%HAD%' then -paper_stake
-               else paper_profit
-             end,
-             settled_at=?3
-         where snapshot_id=?1 and source='live_pre_match'",
-        params![snapshot_id, result_spf, now],
-    )
-    .map_err(|error| error.to_string())?;
+    let paper_rows = {
+        let mut stmt = conn
+            .prepare(
+                "select id, play_type, selection, odds, paper_stake from paper_trading_records
+                 where snapshot_id=?1 and source='live_pre_match'",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map(params![snapshot_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, f64>(3)?,
+                    row.get::<_, f64>(4)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?
+    };
+    for (paper_id, play_type, selection, odds, stake) in paper_rows {
+        if let Some((hit, _actual)) = pick_hit_from_result(&play_type, &selection, &result) {
+            let profit = if hit { (odds - 1.0) * stake } else { -stake };
+            conn.execute(
+                "update paper_trading_records
+                 set result_status='settled', is_hit=?2, paper_profit=?3, settled_at=?4
+                 where id=?1",
+                params![paper_id, if hit { 1 } else { 0 }, profit, now],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+    }
     Ok(
         json!({ "ok": true, "snapshot_id": snapshot_id, "result_spf": result_spf, "total_goals": total_goals }),
     )
@@ -7203,10 +7386,13 @@ fn audit_severity(audit_type: &str) -> &'static str {
         "after_kickoff_snapshot"
         | "final_snapshot_conflict"
         | "settlement_overwrite_risk"
-        | "paper_trade_invalid" => "critical",
+        | "paper_trade_invalid"
+        | "match_id_missing_or_unmatched" => "critical",
         "missing_odds"
         | "missing_model_probs"
         | "invalid_probability_sum"
+        | "odds_match_id_unmatched"
+        | "api_data_stale"
         | "lineup_unknown_near_kickoff" => "warning",
         _ => "info",
     }
@@ -7278,13 +7464,54 @@ async fn audit_pre_match_snapshots(app: AppHandle) -> Result<Value, String> {
         if snapshot.is_final_pre_match {
             *final_counts.entry(snapshot.match_id.clone()).or_default() += 1;
         }
-        if !kickoff_is_future(&snapshot.kickoff_time, &snapshot.snapshot_time) {
+        if !snapshot.created_before_kickoff
+            || !kickoff_is_future(&snapshot.kickoff_time, &snapshot.snapshot_time)
+        {
             add_audit_issue(
                 &mut issues,
                 Some(snapshot.id),
                 &snapshot.match_id,
                 "after_kickoff_snapshot",
                 "快照时间晚于开赛时间，不能进入 live_pre_match 纸面交易。",
+            );
+        }
+        let matched_result_or_match = conn
+            .query_row(
+                "select count(*) from match_results where match_id=?1 or match_label like '%' || ?2 || '%' || ?3 || '%'",
+                params![snapshot.match_id, snapshot.home_team, snapshot.away_team],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+            + if snapshot.match_id.trim().is_empty() { 0 } else { 1 };
+        if snapshot.match_id.trim().is_empty() || matched_result_or_match == 0 {
+            add_audit_issue(
+                &mut issues,
+                Some(snapshot.id),
+                &snapshot.match_id,
+                "match_id_missing_or_unmatched",
+                "快照 match_id 为空或无法关联比赛。",
+            );
+        }
+        let odds_match_count = conn
+            .query_row(
+                "select count(*) from odds_snapshots where match_id=?1",
+                params![snapshot.match_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0);
+        if odds_match_count == 0
+            && snapshot
+                .odds_json
+                .as_array()
+                .map(|items| !items.is_empty())
+                .unwrap_or(false)
+        {
+            add_audit_issue(
+                &mut issues,
+                Some(snapshot.id),
+                &snapshot.match_id,
+                "odds_match_id_unmatched",
+                "快照含赔率，但 odds_snapshots 中找不到同 match_id 的赔率记录。",
             );
         }
         if snapshot
@@ -7361,11 +7588,15 @@ async fn audit_pre_match_snapshots(app: AppHandle) -> Result<Value, String> {
             );
         }
     }
-    let invalid_paper_count: i64 = conn.query_row(
-        "select count(*) from paper_trading_records where source='live_pre_match' and created_before_kickoff=0",
-        [],
-        |row| row.get(0),
-    ).unwrap_or(0);
+    let invalid_paper_count: i64 = conn
+        .query_row(
+            "select count(*) from paper_trading_records
+         where source='live_pre_match'
+           and (created_before_kickoff=0 or is_final_snapshot=0 or odds<=0 or snapshot_id is null)",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
     if invalid_paper_count > 0 {
         add_audit_issue(
             &mut issues,
@@ -7538,6 +7769,129 @@ async fn get_live_paper_trading_summary(app: AppHandle) -> Result<Value, String>
         "recent_10": records.iter().take(10).cloned().collect::<Vec<_>>(),
         "recent_30_roi": if recent_stake > 0.0 { recent_profit / recent_stake } else { 0.0 },
         "warning": if sample_count < 30 { "真实赛前纸面交易样本不足，暂不能评价策略。" } else { "" }
+    }))
+}
+
+#[tauri::command]
+async fn debug_snapshot_flow(
+    app: AppHandle,
+    date: Option<String>,
+    match_id: Option<String>,
+) -> Result<Value, String> {
+    let conn = open_conn(&app)?;
+    let matches = list_matches(app.clone()).await.unwrap_or_default();
+    let snapshots = load_pre_match_snapshots(app.clone())
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|snapshot| {
+            match_id
+                .as_ref()
+                .map(|id| snapshot.match_id == *id)
+                .unwrap_or(true)
+        })
+        .filter(|snapshot| {
+            date.as_ref()
+                .map(|value| snapshot.kickoff_time.starts_with(value))
+                .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
+    let odds_available_count = snapshots
+        .iter()
+        .filter(|snapshot| {
+            snapshot
+                .odds_json
+                .as_array()
+                .map(|items| !items.is_empty())
+                .unwrap_or(false)
+        })
+        .count();
+    let model_available_count = snapshots
+        .iter()
+        .filter(|snapshot| {
+            snapshot
+                .model_probs_json
+                .as_array()
+                .map(|items| !items.is_empty())
+                .unwrap_or(false)
+        })
+        .count();
+    let final_snapshots_count = snapshots
+        .iter()
+        .filter(|snapshot| snapshot.is_final_pre_match)
+        .count();
+    let created_before_kickoff_count = snapshots
+        .iter()
+        .filter(|snapshot| snapshot.created_before_kickoff)
+        .count();
+    let after_kickoff_snapshot_count = snapshots.len().saturating_sub(created_before_kickoff_count);
+    let unsettled_snapshot_count = snapshots
+        .iter()
+        .filter(|snapshot| snapshot.settlement.is_none())
+        .count();
+    let audit_issue_count: i64 = conn
+        .query_row(
+            "select count(*) from snapshot_audit_logs where resolved=0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    let warnings = [
+        (snapshots.is_empty(), "当前筛选条件下没有赛前快照。"),
+        (odds_available_count == 0, "快照缺少赔率，EV 无法计算。"),
+        (
+            final_snapshots_count == 0,
+            "没有 final snapshot，live_pre_match 统计不会纳入样本。",
+        ),
+        (
+            after_kickoff_snapshot_count > 0,
+            "存在赛后生成快照，不能进入 live_pre_match。",
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(enabled, text)| enabled.then_some(text))
+    .collect::<Vec<_>>();
+    let suggested_actions = [
+        (matches.is_empty(), "先同步今日比赛。"),
+        (odds_available_count == 0, "同步赔率后重新生成赛前快照。"),
+        (
+            final_snapshots_count == 0 && !snapshots.is_empty(),
+            "临场前选择最新有效快照并标记 final。",
+        ),
+        (audit_issue_count > 0, "运行快照审计并处理 critical 问题。"),
+    ]
+    .into_iter()
+    .filter_map(|(enabled, text)| enabled.then_some(text))
+    .collect::<Vec<_>>();
+    Ok(json!({
+        "today_matches_count": matches.len(),
+        "snapshots_count": snapshots.len(),
+        "final_snapshots_count": final_snapshots_count,
+        "odds_available_count": odds_available_count,
+        "model_available_count": model_available_count,
+        "created_before_kickoff_count": created_before_kickoff_count,
+        "after_kickoff_snapshot_count": after_kickoff_snapshot_count,
+        "unsettled_snapshot_count": unsettled_snapshot_count,
+        "audit_issue_count": audit_issue_count,
+        "first_5_matches": matches.iter().take(5).map(|item| json!({
+            "match_id": item.id,
+            "kickoff_time": item.time,
+            "home_team": item.home,
+            "away_team": item.away,
+            "status": item.status
+        })).collect::<Vec<_>>(),
+        "first_5_snapshots": snapshots.iter().take(5).map(|item| json!({
+            "snapshot_id": item.id,
+            "match_id": item.match_id,
+            "snapshot_time": item.snapshot_time,
+            "kickoff_time": item.kickoff_time,
+            "is_final_pre_match": item.is_final_pre_match,
+            "created_before_kickoff": item.created_before_kickoff,
+            "final_decision": item.final_decision,
+            "data_quality_score": item.data_quality_score
+        })).collect::<Vec<_>>(),
+        "warnings": warnings,
+        "suggested_actions": suggested_actions
     }))
 }
 
@@ -8358,7 +8712,7 @@ async fn worldcup_practical_advice(app: AppHandle) -> Result<Value, String> {
     if recommendations.is_empty() {
         recommendations = cached_bet_recommendations(&conn);
     }
-    let snapshots = get_pre_match_snapshots(app.clone())
+    let snapshots = load_pre_match_snapshots(app.clone())
         .await
         .unwrap_or_default();
     let analyses = list_match_analyses(app.clone()).await.unwrap_or_default();
@@ -10112,7 +10466,7 @@ async fn generate_upset_lab_candidates(app: AppHandle) -> Result<Value, String> 
             json!({ "ok": true, "created": 0, "funnel": funnel, "empty_reason": "no_today_matches", "message": "暂无今日比赛，请先同步今日比赛。" }),
         );
     }
-    let snapshots = get_pre_match_snapshots(app.clone())
+    let snapshots = load_pre_match_snapshots(app.clone())
         .await
         .unwrap_or_default();
     let preferred = preferred_upset_snapshots(&snapshots);
@@ -10605,7 +10959,7 @@ async fn get_upset_lab_summary(app: AppHandle) -> Result<Value, String> {
 async fn debug_upset_lab_generation(app: AppHandle) -> Result<Value, String> {
     let conn = open_conn(&app)?;
     let matches = list_matches(app.clone()).await.unwrap_or_default();
-    let snapshots = get_pre_match_snapshots(app.clone())
+    let snapshots = load_pre_match_snapshots(app.clone())
         .await
         .unwrap_or_default();
     let snapshot_match_ids = snapshots
@@ -11280,6 +11634,7 @@ pub fn run_app() {
             settle_pre_match_snapshot,
             settle_all_finished_snapshots,
             audit_pre_match_snapshots,
+            debug_snapshot_flow,
             get_snapshot_audit_logs,
             get_live_paper_trading_summary,
             get_live_paper_trading_records,
@@ -11402,6 +11757,38 @@ mod tests {
         assert_eq!(parse_score("2:1"), Some((2, 1)));
         assert_eq!(parse_score(" 0:0 "), Some((0, 0)));
         assert_eq!(parse_score("2-1"), None);
+    }
+
+    #[test]
+    fn snapshot_time_comparison_uses_utc_not_string_order() {
+        assert!(kickoff_is_future(
+            "2026-06-30T12:00:00Z",
+            "2026-06-30T11:59:00Z"
+        ));
+        assert!(kickoff_is_future(
+            "2026-06-30T12:00:00Z",
+            "2026-06-30T20:59:00+09:00"
+        ));
+        assert!(!kickoff_is_future(
+            "2026-06-30T12:00:00Z",
+            "2026-06-30T21:01:00+09:00"
+        ));
+    }
+
+    #[test]
+    fn snapshot_frontend_button_commands_are_registered() {
+        let source = include_str!("legacy_commands.rs");
+        for command in [
+            "create_pre_match_snapshot",
+            "create_today_pre_match_snapshots",
+            "mark_final_pre_match_snapshot",
+            "settle_pre_match_snapshot",
+            "settle_all_finished_snapshots",
+            "audit_pre_match_snapshots",
+            "debug_snapshot_flow",
+        ] {
+            assert!(source.contains(command), "{command} should be registered");
+        }
     }
 
     #[test]
@@ -12472,6 +12859,7 @@ mod tests {
                 paper_strategy_id: String::new(),
                 paper_trade_enabled: false,
                 raw_features_json: json!({}),
+                created_before_kickoff: true,
                 is_final_pre_match: false,
                 created_at: String::new(),
                 updated_at: String::new(),
@@ -12508,6 +12896,7 @@ mod tests {
                 paper_strategy_id: String::new(),
                 paper_trade_enabled: false,
                 raw_features_json: json!({}),
+                created_before_kickoff: true,
                 created_at: String::new(),
                 updated_at: String::new(),
                 settlement: None,
@@ -12551,6 +12940,7 @@ mod tests {
             paper_strategy_id: String::new(),
             paper_trade_enabled: false,
             raw_features_json: json!({}),
+            created_before_kickoff: true,
             created_at: String::new(),
             updated_at: String::new(),
             settlement: None,
@@ -12594,6 +12984,7 @@ mod tests {
                 paper_strategy_id: String::new(),
                 paper_trade_enabled: false,
                 raw_features_json: json!({}),
+                created_before_kickoff: true,
                 created_at: String::new(),
                 updated_at: String::new(),
                 settlement: None,
@@ -12629,6 +13020,7 @@ mod tests {
                 paper_strategy_id: String::new(),
                 paper_trade_enabled: false,
                 raw_features_json: json!({}),
+                created_before_kickoff: true,
                 created_at: String::new(),
                 updated_at: String::new(),
                 settlement: None,
@@ -12911,6 +13303,7 @@ mod tests {
             paper_strategy_id: String::new(),
             paper_trade_enabled: false,
             raw_features_json: json!({}),
+            created_before_kickoff: true,
             created_at: String::new(),
             updated_at: String::new(),
             settlement: None,

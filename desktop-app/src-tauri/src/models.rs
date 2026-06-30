@@ -403,6 +403,7 @@ pub(crate) struct PreMatchSnapshotRow {
     pub(crate) paper_strategy_id: String,
     pub(crate) paper_trade_enabled: bool,
     pub(crate) raw_features_json: Value,
+    pub(crate) created_before_kickoff: bool,
     pub(crate) is_final_pre_match: bool,
     pub(crate) created_at: String,
     pub(crate) updated_at: String,

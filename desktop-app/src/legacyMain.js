@@ -85,6 +85,7 @@ async function refreshTodayContext(source = "自动") {
   state.scorePriors = await loadOptional("get_worldcup_knockout_score_priors", state.scorePriors);
   state.upsetLabSummary = await loadOptional("get_upset_lab_summary", state.upsetLabSummary);
   state.preMatchSnapshots = await loadOptional("get_pre_match_snapshots", state.preMatchSnapshots || []);
+  state.snapshotDebug = await loadOptional("debug_snapshot_flow", state.snapshotDebug);
   state.activeModel = await loadOptional("get_active_model_info", state.activeModel);
   state.systemStatus = await loadOptional("get_system_status", state.systemStatus);
   state.startupHealth = await loadOptional("get_startup_health_check", state.startupHealth);
@@ -127,6 +128,7 @@ async function refreshDataHealth(source = "自动") {
   state.startupHealth = await loadOptional("get_startup_health_check", state.startupHealth);
   state.preMatchSnapshots = await loadOptional("get_pre_match_snapshots", state.preMatchSnapshots || []);
   state.snapshotAuditLogs = await loadOptional("get_snapshot_audit_logs", state.snapshotAuditLogs || []);
+  state.snapshotDebug = await loadOptional("debug_snapshot_flow", state.snapshotDebug);
   state.livePaperSummary = await loadOptional("get_live_paper_trading_summary", state.livePaperSummary);
   state.livePaperRecords = await loadOptional("get_live_paper_trading_records", state.livePaperRecords || []);
   state.projectHealth = await loadOptional("get_project_health_report", state.projectHealth);
@@ -197,6 +199,7 @@ async function loadStatus() {
   state.upsetLabDebug = await loadOptional("debug_upset_lab_generation", null);
   state.preMatchSnapshots = await loadOptional("get_pre_match_snapshots", []);
   state.snapshotAuditLogs = await loadOptional("get_snapshot_audit_logs", []);
+  state.snapshotDebug = await loadOptional("debug_snapshot_flow", null);
   state.livePaperSummary = await loadOptional("get_live_paper_trading_summary", null);
   state.livePaperRecords = await loadOptional("get_live_paper_trading_records", []);
   state.systemStatus = await loadOptional("get_system_status", state.systemStatus);
@@ -505,12 +508,14 @@ async function collectWorldcupSnapshot() {
 async function createPreMatchSnapshot(matchId) {
   state.probeResult = await api.invokeCommand("create_pre_match_snapshot", { matchId });
   state.preMatchSnapshots = await api.invokeCommand("get_pre_match_snapshots");
+  state.snapshotDebug = await api.invokeCommand("debug_snapshot_flow");
   state.practicalAdvice = await api.invokeCommand("worldcup_practical_advice");
 }
 
 async function createTodayPreMatchSnapshots() {
   state.probeResult = await api.invokeCommand("create_today_pre_match_snapshots");
   state.preMatchSnapshots = await api.invokeCommand("get_pre_match_snapshots");
+  state.snapshotDebug = await api.invokeCommand("debug_snapshot_flow");
   state.livePaperSummary = await api.invokeCommand("get_live_paper_trading_summary");
   state.practicalAdvice = await api.invokeCommand("worldcup_practical_advice");
 }
@@ -519,6 +524,7 @@ async function markFinalPreMatchSnapshot(snapshotId) {
   state.probeResult = await api.invokeCommand("mark_final_pre_match_snapshot", { snapshotId: Number(snapshotId) });
   state.preMatchSnapshots = await api.invokeCommand("get_pre_match_snapshots");
   state.snapshotAuditLogs = await api.invokeCommand("get_snapshot_audit_logs");
+  state.snapshotDebug = await api.invokeCommand("debug_snapshot_flow");
   state.livePaperSummary = await api.invokeCommand("get_live_paper_trading_summary");
   state.practicalAdvice = await api.invokeCommand("worldcup_practical_advice");
 }
@@ -534,6 +540,7 @@ async function settlePreMatchSnapshot(snapshotId) {
     awayScore: Number(parts[1])
   });
   state.preMatchSnapshots = await api.invokeCommand("get_pre_match_snapshots");
+  state.snapshotDebug = await api.invokeCommand("debug_snapshot_flow");
   state.livePaperSummary = await api.invokeCommand("get_live_paper_trading_summary");
   state.livePaperRecords = await api.invokeCommand("get_live_paper_trading_records");
   state.practicalAdvice = await api.invokeCommand("worldcup_practical_advice");
@@ -542,6 +549,7 @@ async function settlePreMatchSnapshot(snapshotId) {
 async function settleAllFinishedSnapshots() {
   state.probeResult = await api.invokeCommand("settle_all_finished_snapshots");
   state.preMatchSnapshots = await api.invokeCommand("get_pre_match_snapshots");
+  state.snapshotDebug = await api.invokeCommand("debug_snapshot_flow");
   state.livePaperSummary = await api.invokeCommand("get_live_paper_trading_summary");
   state.livePaperRecords = await api.invokeCommand("get_live_paper_trading_records");
   state.practicalAdvice = await api.invokeCommand("worldcup_practical_advice");
@@ -550,6 +558,7 @@ async function settleAllFinishedSnapshots() {
 async function auditPreMatchSnapshots() {
   state.probeResult = await api.invokeCommand("audit_pre_match_snapshots");
   state.snapshotAuditLogs = await api.invokeCommand("get_snapshot_audit_logs");
+  state.snapshotDebug = await api.invokeCommand("debug_snapshot_flow");
   state.livePaperSummary = await api.invokeCommand("get_live_paper_trading_summary");
   state.systemStatus = await api.invokeCommand("get_system_status");
 }
@@ -1305,6 +1314,21 @@ function snapshotForMatch(matchId) {
     || (state.preMatchSnapshots || []).find(item => item.match_id === matchId);
 }
 
+function snapshotCountForMatch(matchId) {
+  return (state.preMatchSnapshots || []).filter(item => item.match_id === matchId).length;
+}
+
+function auditCountForMatch(matchId) {
+  return (state.snapshotAuditLogs || []).filter(item => item.match_id === matchId && !item.resolved).length;
+}
+
+function localDateTime(value) {
+  if (!value) return "-";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString("zh-CN", { hour12: false });
+}
+
 function snapshotRows() {
   const rows = state.matches || [];
   if (!rows.length) {
@@ -1315,19 +1339,25 @@ function snapshotRows() {
     const model = snap?.model_probs_json?.[0] || {};
     const oddsRow = snap?.odds_json?.[0] || {};
     const evRow = snap?.ev_json?.[0] || {};
+    const count = snapshotCountForMatch(match.id);
+    const auditCount = auditCountForMatch(match.id);
+    const oddsMissing = snap ? !Array.isArray(snap.odds_json) || snap.odds_json.length === 0 : false;
+    const modelMissing = snap ? !Array.isArray(snap.model_probs_json) || snap.model_probs_json.length === 0 : false;
+    const evMissing = snap ? snap.ev_json == null || !Array.isArray(snap.ev_json) || snap.ev_json.length === 0 : false;
+    const settled = Boolean(snap?.settlement);
     return `
       <tr>
-        <td>${match.match_num || "-"}</td>
-        <td>${match.time || "-"}</td>
-        <td><strong>${rankedTeam(match.home)}</strong> vs <strong>${rankedTeam(match.away)}</strong></td>
-        <td>${snap ? snap.snapshot_time : "未生成"}</td>
-        <td>${snap?.is_final_pre_match ? badge("最终") : badge("普通")}</td>
-        <td>${model.pick ? `${model.pick} ${pct(model.model_prob || 0)}` : "-"}</td>
-        <td>${oddsRow.odds ? odds(oddsRow.odds) : "-"}</td>
-        <td>${evRow.ev == null ? "-" : signedPct(evRow.ev)}</td>
+        <td>${match.match_num || "-"}<div class="muted">快照 ${count}</div></td>
+        <td>${localDateTime(match.time)}</td>
+        <td><strong>${rankedTeam(match.home)}</strong> vs <strong>${rankedTeam(match.away)}</strong><div class="muted">${snap ? (settled ? "已结算" : "未结算") : "暂无快照，请点击生成快照。"}</div></td>
+        <td>${snap ? localDateTime(snap.snapshot_time) : "未生成"}<div class="muted">${snap?.created_before_kickoff === false ? "赛后快照，不能进入 live_pre_match 统计。" : snap ? "赛前生成" : ""}</div></td>
+        <td>${snap?.is_final_pre_match ? badge("final") : badge("普通")}<div class="muted">审计 ${auditCount}</div></td>
+        <td>${modelMissing ? "模型缺失" : model.pick ? `${model.pick} ${pct(model.model_prob || 0)}` : "-"}</td>
+        <td>${oddsMissing ? "赔率缺失" : oddsRow.odds ? odds(oddsRow.odds) : "-"}</td>
+        <td>${oddsMissing ? "赔率缺失，不能计算 EV" : evMissing || evRow.ev == null ? "-" : signedPct(evRow.ev)}</td>
         <td>${snap ? `${Number(snap.data_quality_score || 0).toFixed(0)}分` : "-"}</td>
-        <td>${snap ? `${snap.injury_status} / ${Number(snap.injury_confidence || 0).toFixed(0)}` : "-"}</td>
-        <td>${snap ? badge(snap.final_decision) : "-"}</td>
+        <td>${snap ? `${snap.injury_status || "-"} / ${Number(snap.injury_confidence || 0).toFixed(0)}` : "-"}</td>
+        <td>${snap ? badge(snap.final_decision) : "-"}<div class="muted">${oddsMissing ? "已生成基础快照，但不能计算 EV。" : ""}</div></td>
         <td>
           <button class="mini" data-action="create-pre-snapshot" data-match-id="${match.id}">生成当前快照</button>
           ${snap ? `<button class="mini" data-action="mark-final-snapshot" data-snapshot-id="${snap.id}">标记最终</button>` : ""}
@@ -1476,6 +1506,7 @@ function preMatchSnapshotHtml() {
   const snapshots = state.preMatchSnapshots || [];
   const paperCount = snapshots.filter(item => item.paper_trade_enabled).length;
   const audits = state.snapshotAuditLogs || [];
+  const debug = state.snapshotDebug || {};
   const criticalCount = audits.filter(item => item.severity === "critical" && !item.resolved).length;
   const warningCount = audits.filter(item => item.severity === "warning" && !item.resolved).length;
   const live = state.livePaperSummary || {};
@@ -1506,6 +1537,19 @@ function preMatchSnapshotHtml() {
       <section class="panel span-3 metric"><span>live 命中率</span><strong>${pct(live.hit_rate || 0)}</strong><div class="muted">${live.warning || "真实赛前纸面交易"}</div></section>
       <section class="panel span-3 metric"><span>live ROI</span><strong>${signedPct(live.paper_roi || 0)}</strong><div class="muted">近30 ${signedPct(live.recent_30_roi || 0)}</div></section>
       <section class="panel span-3 metric"><span>live 盈亏</span><strong>${signedPct(live.total_paper_profit || 0)}</strong><div class="muted">投入 ${Number(live.total_paper_stake || 0).toFixed(0)}</div></section>
+      <section class="panel span-12">
+        <h3>快照链路调试</h3>
+        <div class="plan-grid">
+          <div><h4>今日比赛</h4><p class="muted">${debug.today_matches_count ?? 0}</p></div>
+          <div><h4>快照 / final</h4><p class="muted">${debug.snapshots_count ?? snapshots.length} / ${debug.final_snapshots_count ?? snapshots.filter(item => item.is_final_pre_match).length}</p></div>
+          <div><h4>有赔率 / 有模型</h4><p class="muted">${debug.odds_available_count ?? 0} / ${debug.model_available_count ?? 0}</p></div>
+          <div><h4>赛前 / 赛后快照</h4><p class="muted">${debug.created_before_kickoff_count ?? 0} / ${debug.after_kickoff_snapshot_count ?? 0}</p></div>
+          <div><h4>未结算</h4><p class="muted">${debug.unsettled_snapshot_count ?? 0}</p></div>
+          <div><h4>审计问题</h4><p class="muted">${debug.audit_issue_count ?? audits.filter(item => !item.resolved).length}</p></div>
+        </div>
+        <p class="muted">${(debug.warnings || []).join("；") || "快照链路暂无明显阻断。"}</p>
+        <p class="muted">${(debug.suggested_actions || []).join("；") || ""}</p>
+      </section>
       <section class="panel span-12">
         <h3>赛前快照中心</h3>
         <p class="muted">伤停或赔率数据未确认时，当前使用基础模型，相关玩法降级观察。以下为策略观察样本，仅用于模拟记录，不建议真实下注。</p>

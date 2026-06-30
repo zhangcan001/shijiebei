@@ -277,6 +277,7 @@ pub(crate) fn open_conn(app: &AppHandle) -> Result<Connection, String> {
           paper_strategy_id text not null default '',
           paper_trade_enabled integer not null default 0,
           raw_features_json text not null,
+          created_before_kickoff integer not null default 1,
           is_final_pre_match integer not null default 0,
           created_at text not null,
           updated_at text not null
@@ -428,6 +429,7 @@ pub(crate) fn open_conn(app: &AppHandle) -> Result<Connection, String> {
         "alter table paper_trading_records add column play_pool text not null default ''",
         "alter table paper_trading_records add column risk_level text not null default ''",
         "alter table paper_trading_records add column is_real_bet integer not null default 0",
+        "alter table pre_match_snapshots add column created_before_kickoff integer not null default 1",
         "alter table upset_lab_candidates add column data_quality_score real not null default 0",
         "alter table upset_lab_candidates add column scan_score real not null default 0",
     ];
