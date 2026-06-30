@@ -9,6 +9,10 @@ import {
   refreshStatusHtml as refreshStatusBarHtml
 } from "./components/RefreshStatusBar.js";
 import { scorePriorCardHtml as scorePriorCardComponentHtml } from "./components/ScorePriorCard.js";
+import { renderUpsetLabView } from "./views/UpsetLabView.js";
+import { renderSnapshotView } from "./views/SnapshotView.js";
+import { handleCleanCoreAction } from "./events.js";
+import { refreshProjectHealth, refreshUpsetLabData } from "./refresh.js";
 import { pct, odds, signedPct, money, ciText, rankedTeam, rankedMatchLabel } from "./utils/format.js";
 const views = [
   ["today", "今日方案"],
@@ -83,7 +87,7 @@ async function refreshTodayContext(source = "自动") {
   state.preMatchSnapshots = await loadOptional("get_pre_match_snapshots", state.preMatchSnapshots || []);
   state.activeModel = await loadOptional("get_active_model_info", state.activeModel);
   state.systemStatus = await loadOptional("get_system_status", state.systemStatus);
-  state.projectHealth = await loadOptional("get_project_health_report", state.projectHealth);
+  await refreshProjectHealth({ state, loadOptional, markRefresh }, source);
   markRefresh("lastTodayAt", "今日方案已更新", source);
 }
 
@@ -591,14 +595,7 @@ async function runWorldcupClosureCycle() {
 }
 
 async function refreshUpsetLab() {
-  state.probeResult = await api.invokeCommand("generate_upset_lab_candidates");
-  state.scorePriors = await api.invokeCommand("get_worldcup_knockout_score_priors");
-  state.upsetLabCandidates = await api.invokeCommand("get_upset_lab_candidates");
-  state.upsetLabSummary = await api.invokeCommand("get_upset_lab_summary");
-  state.upsetLabBacktest = await api.invokeCommand("get_upset_lab_backtest_summary");
-  state.upsetLabRobustness = await api.invokeCommand("get_upset_lab_robustness_summary");
-  state.upsetLabDebug = await api.invokeCommand("debug_upset_lab_generation");
-  markRefresh("lastTodayAt", "冷门实验室候选已生成", "手动");
+  await refreshUpsetLabData({ api, state, loadOptional, markRefresh });
 }
 
 async function createUpsetPaperTrades() {
@@ -2232,7 +2229,7 @@ function viewHtml() {
     return singleMatchAnalysisHtml();
   }
   if (state.view === "sim") return simHtml();
-  if (state.view === "upset") return upsetLabHtml();
+  if (state.view === "upset") return renderUpsetLabView(state);
   if (state.view === "today") return todayPlanHtml();
   if (state.view === "practical" || state.view === "snapshots" || state.view === "recommend" || state.view === "bankroll") {
     state.view = "today";
@@ -2369,7 +2366,7 @@ function viewHtml() {
   }
   return `
     <div class="grid">
-      ${systemStatusHtml()}
+      ${renderSnapshotView(state, { snapshotRows, auditRows, livePaperRows })}
       ${projectHealthCardHtml(state.projectHealth)}
       ${modelStatusCard()}
       ${sourceCards()}
@@ -2466,6 +2463,15 @@ document.addEventListener("click", event => {
     });
   }
   if (action === "reload") safeRun("刷新状态", loadStatus);
+  if (action && handleCleanCoreAction(action, event, safeRun, {
+    refreshUpsetLab,
+    createUpsetPaperTrades,
+    settleUpsetPaperTrades,
+    createPreMatchSnapshot,
+    markFinalPreMatchSnapshot,
+    settlePreMatchSnapshot,
+    exportAppData
+  })) return;
   if (action === "refresh-current-view") safeRun("同步当前页", async () => refreshViewContext(state.view, "手动", true));
   if (action === "refresh-today") safeRun("重新生成今日方案", async () => refreshTodayContext("手动"));
   if (action === "refresh-core") safeRun("刷新核心数据", refreshCore);

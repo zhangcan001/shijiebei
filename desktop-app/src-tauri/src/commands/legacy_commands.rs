@@ -10620,23 +10620,7 @@ async fn debug_upset_lab_generation(app: AppHandle) -> Result<Value, String> {
 }
 
 fn upset_lab_paper_trade_skip_reason(candidate: &Value) -> Option<&'static str> {
-    let decision = candidate
-        .get("final_lab_decision")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if decision == "no_odds_scan" {
-        return Some("missing_odds");
-    }
-    if decision == "scan_only" {
-        return Some("scan_only");
-    }
-    if !matches!(decision, "paper_candidate" | "tiny_stake_candidate") {
-        return Some("ineligible_decision");
-    }
-    if candidate.get("odds").and_then(Value::as_f64).unwrap_or(0.0) <= 1.0 {
-        return Some("missing_odds");
-    }
-    None
+    crate::services::upset_lab_service::paper_trade_skip_reason(candidate)
 }
 
 #[tauri::command]
