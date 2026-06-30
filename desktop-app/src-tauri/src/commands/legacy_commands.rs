@@ -44,7 +44,7 @@ const SPORTTERY_INJURY_URL: &str =
     "https://webapi.sporttery.cn/gateway/uniform/football/jcInfo/getAllTodayInjurySuspensionV1.qry";
 const STATSBOMB_BASE: &str = "https://cdn.jsdelivr.net/gh/statsbomb/open-data@master/data";
 const ZGZCW_RESULTS_URL: &str = "https://worldcup.zgzcw.com/zhuanti/worldCupsc";
-const APP_VERSION: &str = "v0.2-clean-core";
+const APP_VERSION: &str = "v0.2-stable-personal";
 
 fn runtime_score_priors() -> Value {
     let app_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -8226,10 +8226,16 @@ fn snapshot_practical_rows(snapshot: &PreMatchSnapshotRow) -> Vec<Value> {
             .and_then(|row| row.get("sporttery_prob"))
             .and_then(Value::as_f64)
             .unwrap_or(0.0);
-        let ev = ev_row
-            .and_then(|row| row.get("ev"))
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0);
+        let odds_value = odds_row
+            .and_then(|row| row.get("odds"))
+            .and_then(Value::as_f64);
+        let has_odds = odds_value.is_some_and(|value| value > 0.0);
+        let ev = if has_odds {
+            ev_row.and_then(|row| row.get("ev")).and_then(Value::as_f64)
+        } else {
+            None
+        };
+        let ev_for_decision = ev.unwrap_or(-1.0);
         let final_decision = reason_row
             .and_then(|row| row.get("final_decision"))
             .and_then(Value::as_str)
@@ -8237,7 +8243,7 @@ fn snapshot_practical_rows(snapshot: &PreMatchSnapshotRow) -> Vec<Value> {
         let (category, practical_decision, stake, practical_reason) = practical_layer_for(
             market,
             final_decision,
-            ev,
+            ev_for_decision,
             model_prob - market_prob,
             snapshot.data_quality_score,
             snapshot.lineup_confidence,
@@ -8256,6 +8262,31 @@ fn snapshot_practical_rows(snapshot: &PreMatchSnapshotRow) -> Vec<Value> {
             .and_then(|row| row.get("support"))
             .and_then(Value::as_str)
             .unwrap_or("");
+        let odds_snapshot_count = snapshot
+            .odds_json
+            .as_array()
+            .map(|items| items.len())
+            .unwrap_or(0);
+        let mut missing_fields = Vec::new();
+        if !has_odds {
+            missing_fields.push("odds");
+        }
+        if market_prob <= 0.0 {
+            missing_fields.push("market_prob");
+        }
+        if ev.is_none() {
+            missing_fields.push("ev");
+        }
+        if snapshot.data_quality_score <= 0.0 {
+            missing_fields.push("data_quality_score");
+        }
+        let completeness_note = if !has_odds {
+            "赔率缺失，不能计算 EV"
+        } else if odds_snapshot_count < 2 {
+            "快照不足，无法判断变化"
+        } else {
+            "赛前数据可用于观察"
+        };
         rows.push(json!({
             "match_id": snapshot.match_id,
             "match_time": snapshot.kickoff_time,
@@ -8265,7 +8296,7 @@ fn snapshot_practical_rows(snapshot: &PreMatchSnapshotRow) -> Vec<Value> {
             "model_prob": model_prob,
             "market_prob": market_prob,
             "probability_gap": model_prob - market_prob,
-            "odds": odds_row.and_then(|row| row.get("odds")).and_then(Value::as_f64).unwrap_or(0.0),
+            "odds": odds_value,
             "ev": ev,
             "data_score": snapshot.data_quality_score,
             "risk_tags": if risk_tags.is_empty() { risk.to_string() } else { format!("{}；{}", risk_tags, risk) },
@@ -8274,10 +8305,19 @@ fn snapshot_practical_rows(snapshot: &PreMatchSnapshotRow) -> Vec<Value> {
             "practical_decision": practical_decision,
             "category": category,
             "bankroll_suggestion": stake,
-            "reason": if detail_reason.is_empty() { practical_reason } else { format!("{}；{}", practical_reason, detail_reason) },
+            "reason": if detail_reason.is_empty() { format!("{}；{}", practical_reason, completeness_note) } else { format!("{}；{}；{}", practical_reason, detail_reason, completeness_note) },
             "snapshot_note": note,
             "snapshot_id": snapshot.id,
-            "snapshot_time": snapshot.snapshot_time
+            "snapshot_time": snapshot.snapshot_time,
+            "is_final_snapshot": snapshot.is_final_pre_match,
+            "odds_snapshot_count": odds_snapshot_count,
+            "odds_source": if has_odds { "snapshot_odds" } else { "" },
+            "has_odds": has_odds,
+            "has_result": snapshot.settlement.is_some(),
+            "has_lineup": !snapshot.lineup_status.is_empty() && snapshot.lineup_status != "unknown",
+            "has_injury": !snapshot.injury_status.is_empty() && snapshot.injury_status != "unknown",
+            "missing_fields": missing_fields,
+            "odds_change_note": if odds_snapshot_count < 2 { "快照不足，无法判断变化" } else { "可判断赔率变化" }
         }));
     }
     rows
@@ -11252,6 +11292,7 @@ pub fn run_app() {
             open_backup_dir,
             get_system_status,
             super::system_commands::get_project_health_report,
+            super::system_commands::get_startup_health_check,
             collect_worldcup_pre_match_snapshot,
             settle_bet_recommendations,
             export_worldcup_training_samples,
@@ -12707,10 +12748,17 @@ mod tests {
         let cases = [
             ("0:0", "0球", true),
             ("1:0", "1球", true),
+            ("0:1", "1球", true),
             ("1:1", "2球", true),
+            ("2:0", "2球", true),
+            ("0:2", "2球", true),
             ("2:1", "3球", true),
+            ("1:2", "3球", true),
+            ("3:0", "3球", true),
+            ("0:3", "3球", true),
             ("3:1", "4球", true),
             ("3:2", "5球", true),
+            ("3:3", "6球", true),
             ("4:2", "6+球", true),
             ("4:3", "7+球", true),
             ("1:1", "3球", false),
@@ -12732,6 +12780,154 @@ mod tests {
                 "{score} should match {pick}={expected}"
             );
         }
+    }
+
+    #[test]
+    fn handicap_settlement_handles_minus_one_and_plus_one() {
+        let win_by_two = MatchResult {
+            home: "法国".to_string(),
+            away: "德国".to_string(),
+            score: "2:0".to_string(),
+            half_score: "1:0".to_string(),
+            stage: "淘汰赛".to_string(),
+            status: "完场".to_string(),
+        };
+        assert_eq!(
+            pick_hit_from_result("预测中心-HHAD让球胜平负 -1", "让胜", &win_by_two).unwrap(),
+            (true, "让胜".to_string())
+        );
+
+        let win_by_one = MatchResult {
+            score: "2:1".to_string(),
+            ..win_by_two.clone()
+        };
+        assert_eq!(
+            pick_hit_from_result("预测中心-HHAD让球胜平负 -1", "让平", &win_by_one).unwrap(),
+            (true, "让平".to_string())
+        );
+
+        let draw = MatchResult {
+            score: "1:1".to_string(),
+            ..win_by_two.clone()
+        };
+        assert_eq!(
+            pick_hit_from_result("预测中心-HHAD让球胜平负 -1", "让负", &draw).unwrap(),
+            (true, "让负".to_string())
+        );
+
+        let home_draw_with_plus_one = MatchResult {
+            score: "1:1".to_string(),
+            ..win_by_two.clone()
+        };
+        assert_eq!(
+            pick_hit_from_result(
+                "预测中心-HHAD让球胜平负 +1",
+                "让胜",
+                &home_draw_with_plus_one
+            )
+            .unwrap(),
+            (true, "让胜".to_string())
+        );
+
+        let home_loses_by_one_with_plus_one = MatchResult {
+            score: "0:1".to_string(),
+            ..win_by_two.clone()
+        };
+        assert_eq!(
+            pick_hit_from_result(
+                "预测中心-HHAD让球胜平负 +1",
+                "让平",
+                &home_loses_by_one_with_plus_one
+            )
+            .unwrap(),
+            (true, "让平".to_string())
+        );
+
+        let home_loses_by_two_with_plus_one = MatchResult {
+            score: "0:2".to_string(),
+            ..win_by_two
+        };
+        assert_eq!(
+            pick_hit_from_result(
+                "预测中心-HHAD让球胜平负 +1",
+                "让负",
+                &home_loses_by_two_with_plus_one
+            )
+            .unwrap(),
+            (true, "让负".to_string())
+        );
+    }
+
+    #[test]
+    fn correct_score_settlement_uses_recorded_ninety_minute_score_only() {
+        let result = MatchResult {
+            home: "法国".to_string(),
+            away: "德国".to_string(),
+            score: "1:1".to_string(),
+            half_score: "0:0".to_string(),
+            stage: "淘汰赛".to_string(),
+            status: "加时后2:1 点球不计入竞彩比分".to_string(),
+        };
+        assert_eq!(
+            pick_hit_from_result("预测中心-比分参考", "1:1", &result).unwrap(),
+            (true, "1:1".to_string())
+        );
+        assert_eq!(
+            pick_hit_from_result("预测中心-比分参考", "2:1", &result).unwrap(),
+            (false, "1:1".to_string())
+        );
+    }
+
+    #[test]
+    fn snapshot_practical_rows_do_not_calculate_ev_without_odds() {
+        let snapshot = PreMatchSnapshotRow {
+            id: 12,
+            match_id: "m-no-odds".to_string(),
+            snapshot_time: "2026-06-30T10:00:00Z".to_string(),
+            is_final_pre_match: true,
+            external_fixture_id: String::new(),
+            provider_match_id: String::new(),
+            kickoff_time: "2026-06-30T18:00:00Z".to_string(),
+            home_team: "法国".to_string(),
+            away_team: "德国".to_string(),
+            competition: "世界杯".to_string(),
+            season: "2026".to_string(),
+            stage: "淘汰赛".to_string(),
+            model_version: "model".to_string(),
+            model_probs_json: json!([{"market":"HAD 胜平负","pick":"主胜","model_prob":0.58}]),
+            calibrated_probs_json: json!([]),
+            worldcup_correction_action: String::new(),
+            odds_json: json!([]),
+            market_probs_json: json!([]),
+            ev_json: json!([]),
+            data_quality_score: 72.0,
+            lineup_status: "unknown".to_string(),
+            lineup_confidence: 0.0,
+            injury_status: "unknown".to_string(),
+            injury_confidence: 0.0,
+            risk_tags_json: json!([]),
+            final_decision: "observe_only".to_string(),
+            decision_reason_json: json!([]),
+            paper_strategy_id: String::new(),
+            paper_trade_enabled: false,
+            raw_features_json: json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+            settlement: None,
+        };
+        let rows = snapshot_practical_rows(&snapshot);
+        let row = rows.first().unwrap();
+        assert_eq!(row.get("has_odds").and_then(Value::as_bool), Some(false));
+        assert!(row.get("ev").unwrap().is_null());
+        assert_eq!(
+            row.get("odds_change_note").and_then(Value::as_str),
+            Some("快照不足，无法判断变化")
+        );
+        assert!(row
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap()
+            .contains("赔率缺失，不能计算 EV"));
     }
 
     #[test]
@@ -13009,7 +13205,7 @@ mod tests {
         });
         assert_eq!(
             status.get("app_version").and_then(Value::as_str),
-            Some("v0.2-clean-core")
+            Some("v0.2-stable-personal")
         );
         assert_eq!(
             status.get("strategy_status").and_then(Value::as_str),
@@ -13021,6 +13217,38 @@ mod tests {
                 .and_then(Value::as_str),
             Some("风控开启")
         );
+    }
+
+    #[test]
+    fn stable_personal_project_health_pauses_large_split_pressure() {
+        let health = crate::services::system_service::project_health_report();
+        assert_eq!(
+            health.get("stable_personal_mode").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            health
+                .get("legacy_commands_active")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            health
+                .get("clean_core_split_paused")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        let flags = health
+            .get("risk_flags")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        assert!(!flags
+            .iter()
+            .any(|item| item.as_str() == Some("giant_main_js")));
+        assert!(!flags
+            .iter()
+            .any(|item| item.as_str() == Some("legacy_commands_pending_split")));
     }
 
     #[test]

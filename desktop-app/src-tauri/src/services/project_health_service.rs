@@ -102,12 +102,7 @@ pub fn project_health_report() -> Value {
     let db_text =
         fs::read_to_string(desktop.join("src-tauri").join("src").join("db.rs")).unwrap_or_default();
     let mut risk_flags = Vec::new();
-    if main_js_lines > 300 {
-        risk_flags.push("giant_main_js");
-    }
-    if commands_mod_lines > 300 {
-        risk_flags.push("giant_commands_mod");
-    }
+    let stable_personal_mode = true;
     if !docs_arch.exists() {
         risk_flags.push("missing_architecture_doc");
     }
@@ -123,7 +118,7 @@ pub fn project_health_report() -> Value {
     if !review_service.exists() {
         risk_flags.push("missing_review_service");
     }
-    if !development_text.contains("v0.2-clean-core") {
+    if !development_text.contains("v0.2-stable-personal") {
         risk_flags.push("development_version_outdated");
     }
     if !commands_text.contains("score_diversity_guard")
@@ -138,9 +133,6 @@ pub fn project_health_report() -> Value {
     }
     if commands_text.contains("upset_lab_candidates") && commands_text.contains("today_bet_plan") {
         risk_flags.push("upset_lab_not_fully_extracted");
-    }
-    if legacy_commands_lines > 2000 {
-        risk_flags.push("legacy_commands_pending_split");
     }
     json!({
         "main_js_size": main_js_lines,
@@ -158,8 +150,12 @@ pub fn project_health_report() -> Value {
         "has_export_service": export_service.exists(),
         "has_project_health_service": project_health_service.exists(),
         "has_review_guard_service": review_guard_service.exists(),
-        "clean_core_version": "v0.2-clean-core",
-        "current_version": "v0.2-clean-core",
+        "clean_core_version": "v0.2-stable-personal",
+        "current_version": "v0.2-stable-personal",
+        "stable_personal_mode": stable_personal_mode,
+        "legacy_commands_active": legacy_commands_lines > 0,
+        "legacy_main_active": main_js_lines <= 5,
+        "clean_core_split_paused": true,
         "command_count": commands_text.matches("#[tauri::command]").count() as i64,
         "service_count": count_files_with_ext(&services_dir, "rs"),
         "view_count": count_files_with_ext(&views_dir, "js"),
@@ -167,9 +163,10 @@ pub fn project_health_report() -> Value {
         "test_count": commands_text.matches("#[test]").count() as i64,
         "risk_flags": risk_flags,
         "notes": [
-            "入口层已压缩，legacy 文件继续承载待迁移业务代码。",
+            "当前版本以稳定运行为优先，legacy 文件暂不继续大拆。",
             "正式推荐和冷门实验室保持隔离；hard_ban 永远最高优先级。",
-            "复盘只生成review_note和observation_only候选，不自动改正式规则。"
+            "复盘只生成review_note和observation_only候选，不自动改正式规则。",
+            "v0.2-stable-personal 阶段只做小范围修 bug、测试和数据校验。"
         ]
     })
 }

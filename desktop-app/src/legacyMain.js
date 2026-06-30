@@ -87,6 +87,7 @@ async function refreshTodayContext(source = "自动") {
   state.preMatchSnapshots = await loadOptional("get_pre_match_snapshots", state.preMatchSnapshots || []);
   state.activeModel = await loadOptional("get_active_model_info", state.activeModel);
   state.systemStatus = await loadOptional("get_system_status", state.systemStatus);
+  state.startupHealth = await loadOptional("get_startup_health_check", state.startupHealth);
   await refreshProjectHealth({ state, loadOptional, markRefresh }, source);
   markRefresh("lastTodayAt", "今日方案已更新", source);
 }
@@ -123,6 +124,7 @@ async function refreshDataHealth(source = "自动") {
   state.status = await loadOptional("app_status", state.status);
   state.providers = state.status?.providers || await loadOptional("list_providers", state.providers || []);
   state.systemStatus = await loadOptional("get_system_status", state.systemStatus);
+  state.startupHealth = await loadOptional("get_startup_health_check", state.startupHealth);
   state.preMatchSnapshots = await loadOptional("get_pre_match_snapshots", state.preMatchSnapshots || []);
   state.snapshotAuditLogs = await loadOptional("get_snapshot_audit_logs", state.snapshotAuditLogs || []);
   state.livePaperSummary = await loadOptional("get_live_paper_trading_summary", state.livePaperSummary);
@@ -180,6 +182,7 @@ async function loadStatus() {
   state.diagnostics = await api.invokeCommand("model_diagnostics");
   state.activeModel = await api.invokeCommand("get_active_model_info");
   state.systemStatus = await api.invokeCommand("get_system_status");
+  state.startupHealth = await loadOptional("get_startup_health_check", null);
   state.projectHealth = await loadOptional("get_project_health_report", null);
   state.backtest = await api.invokeCommand("backtest_report");
   state.recommendations = await loadOptional("list_recommendations", []);
@@ -197,6 +200,7 @@ async function loadStatus() {
   state.livePaperSummary = await loadOptional("get_live_paper_trading_summary", null);
   state.livePaperRecords = await loadOptional("get_live_paper_trading_records", []);
   state.systemStatus = await loadOptional("get_system_status", state.systemStatus);
+  state.startupHealth = await loadOptional("get_startup_health_check", state.startupHealth);
   markRefresh("lastGlobalAt", "启动数据已加载", "启动");
 }
 
@@ -1226,10 +1230,10 @@ function practicalRows(rows = [], emptyText = "暂无") {
       <td><strong>${item.pick || "-"}</strong></td>
       <td>${pct(item.model_prob || 0)}</td>
       <td>${pct(item.market_prob || 0)}</td>
-      <td>${odds(item.odds || 0)}</td>
-      <td class="${(item.ev || 0) >= 0 ? "down" : "up"}">${signedPct(item.ev || 0)}</td>
-      <td>${Number(item.data_score || 0).toFixed(0)}</td>
-      <td>${money(item.bankroll_suggestion || 0)}<div class="muted reason">${item.reason || ""}</div><div class="muted reason">${item.risk_tags || ""}</div></td>
+      <td>${item.has_odds === false ? "赔率缺失" : odds(item.odds || 0)}</td>
+      <td class="${item.ev == null ? "" : (item.ev || 0) >= 0 ? "down" : "up"}">${item.ev == null ? "赔率缺失，不能计算 EV" : signedPct(item.ev || 0)}</td>
+      <td>${Number(item.data_score || 0).toFixed(0)}<div class="muted">${(item.missing_fields || []).length ? `缺失：${item.missing_fields.join("、")}` : "数据完整"}</div></td>
+      <td>${money(item.bankroll_suggestion || 0)}<div class="muted reason">${item.reason || ""}</div><div class="muted reason">${item.odds_change_note || ""}</div><div class="muted reason">快照：${item.is_final_snapshot ? "final" : "非 final"} · 赔率快照 ${item.odds_snapshot_count ?? 0}</div><div class="muted reason">${item.risk_tags || ""}</div></td>
     </tr>
   `).join("");
 }
@@ -1399,6 +1403,32 @@ function livePaperRows() {
   `).join("");
 }
 
+function startupHealthHtml() {
+  const health = state.startupHealth || {};
+  const checks = health.checks || [];
+  const warnings = health.warnings || [];
+  const actions = health.suggested_actions || [];
+  const statusClass = health.status === "critical" ? "danger" : health.status === "warning" ? "warn" : "ok";
+  if (!checks.length) {
+    return `<p class="muted">启动自检尚未运行。</p>`;
+  }
+  return `
+    <div class="status-strip ${statusClass}">
+      <strong>启动自检：${health.status || "unknown"}</strong>
+      <span>${warnings[0] || "核心数据读写正常。"}</span>
+    </div>
+    <div class="plan-grid">
+      ${checks.map(item => `
+        <div>
+          <h4>${item.ok ? "正常" : item.severity === "critical" ? "严重" : "提醒"} · ${item.name}</h4>
+          <p class="muted">${item.message || "-"}</p>
+        </div>
+      `).join("")}
+    </div>
+    ${actions.length ? `<p class="muted">建议：${actions.join("；")}</p>` : ""}
+  `;
+}
+
 function systemStatusHtml() {
   const status = state.systemStatus || {};
   const lastBackup = status.last_backup || {};
@@ -1423,6 +1453,7 @@ function systemStatusHtml() {
         <div><h4>未结算</h4><p class="muted">${status.live_pre_match_unsettled_count || 0} 条</p></div>
         <div><h4>数据库路径</h4><p class="muted">${status.db_path || "-"}</p></div>
       </div>
+      ${startupHealthHtml()}
     </section>
   `;
 }
