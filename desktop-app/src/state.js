@@ -28,6 +28,7 @@ export const state = {
   diagnostics: null,
   activeModel: null,
   systemStatus: null,
+  projectHealth: null,
   settleSummary: null,
   dailyReviewSummary: null,
   simulationProgress: null,

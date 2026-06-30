@@ -158,9 +158,9 @@ pub(crate) fn score_prior_probability(priors: &Value, score: &str) -> f64 {
 
 pub(crate) fn score_prior_weight(data_quality_score: f64) -> f64 {
     if data_quality_score < 60.0 {
-        0.40
+        0.30
     } else {
-        0.25
+        0.20
     }
 }
 

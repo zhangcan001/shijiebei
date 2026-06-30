@@ -3,6 +3,12 @@ import { listen } from "@tauri-apps/api/event";
 import "./styles.css";
 
 import { state } from "./state.js";
+import { projectHealthHtml as projectHealthCardHtml } from "./components/ProjectHealthCard.js";
+import {
+  dataRefreshProgressHtml as dataRefreshProgressCardHtml,
+  refreshStatusHtml as refreshStatusBarHtml
+} from "./components/RefreshStatusBar.js";
+import { scorePriorCardHtml as scorePriorCardComponentHtml } from "./components/ScorePriorCard.js";
 import { pct, odds, signedPct, money, ciText, rankedTeam, rankedMatchLabel } from "./utils/format.js";
 const views = [
   ["today", "今日方案"],
@@ -77,6 +83,7 @@ async function refreshTodayContext(source = "自动") {
   state.preMatchSnapshots = await loadOptional("get_pre_match_snapshots", state.preMatchSnapshots || []);
   state.activeModel = await loadOptional("get_active_model_info", state.activeModel);
   state.systemStatus = await loadOptional("get_system_status", state.systemStatus);
+  state.projectHealth = await loadOptional("get_project_health_report", state.projectHealth);
   markRefresh("lastTodayAt", "今日方案已更新", source);
 }
 
@@ -116,6 +123,7 @@ async function refreshDataHealth(source = "自动") {
   state.snapshotAuditLogs = await loadOptional("get_snapshot_audit_logs", state.snapshotAuditLogs || []);
   state.livePaperSummary = await loadOptional("get_live_paper_trading_summary", state.livePaperSummary);
   state.livePaperRecords = await loadOptional("get_live_paper_trading_records", state.livePaperRecords || []);
+  state.projectHealth = await loadOptional("get_project_health_report", state.projectHealth);
   markRefresh("lastHealthAt", "数据源健康已更新", source);
 }
 
@@ -168,6 +176,7 @@ async function loadStatus() {
   state.diagnostics = await api.invokeCommand("model_diagnostics");
   state.activeModel = await api.invokeCommand("get_active_model_info");
   state.systemStatus = await api.invokeCommand("get_system_status");
+  state.projectHealth = await loadOptional("get_project_health_report", null);
   state.backtest = await api.invokeCommand("backtest_report");
   state.recommendations = await loadOptional("list_recommendations", []);
   state.analyses = await loadOptional("list_match_analyses", []);
@@ -622,24 +631,6 @@ function fileSize(bytes) {
   return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
-function dataRefreshProgressHtml(compact = false) {
-  const progress = state.dataRefreshProgress;
-  if (!progress) return "";
-  const total = Number(progress.total || 8);
-  const step = Number(progress.step || 0);
-  const percent = Math.round(Number(progress.percent ?? (total ? step / total : 0)) * 100);
-  return `
-    <section class="panel ${compact ? "progress-panel" : "span-12 progress-panel"}">
-      <div class="progress-head">
-        <strong>${progress.label || "全局刷新数据源"}</strong>
-        <span>${percent}% · ${step} / ${total}</span>
-      </div>
-      <progress value="${step}" max="${total || 1}"></progress>
-      <p class="muted">${badge(progress.status || "running")} ${progress.message || "正在刷新数据源..."}</p>
-    </section>
-  `;
-}
-
 function pageDescription(view = state.view) {
   const descriptions = {
     today: "行动页：主推、小注、观察、禁买和比分参考集中在这里。",
@@ -653,21 +644,6 @@ function pageDescription(view = state.view) {
     sources: "系统维护：数据源健康、API额度、备份导出。"
   };
   return descriptions[view] || "本地缓存、稳健推荐、异动记录、模拟对决。";
-}
-
-function refreshStatusHtml() {
-  const meta = state.refreshMeta || {};
-  const status = state.systemStatus || {};
-  return `
-    <div class="refresh-strip">
-      <span>${state.busy ? "正在处理" : "自动刷新就绪"}</span>
-      <span>${meta.label || state.message || "准备就绪"}</span>
-      <span>今日 ${meta.lastTodayAt || "-"}</span>
-      <span>赔率 ${meta.lastOddsAt || "-"}</span>
-      <span>赛果 ${meta.lastResultsAt || "-"}</span>
-      <span>数据源 ${state.status?.sources?.length || "-"} 项</span>
-    </div>
-  `;
 }
 
 function sourceCards() {
@@ -790,30 +766,6 @@ function upsetFunnelHtml() {
   `;
 }
 
-function scorePriorCardHtml() {
-  const summary = state.scorePriors?.summary || state.practicalAdvice?.score_prior || {};
-  return `
-    <section class="panel span-12">
-      <h3>近两届世界杯淘汰赛90分钟比分先验</h3>
-      <p class="muted">${summary.message || "本系统按竞彩口径统计90分钟比分，加时和点球不计入比分先验。该先验只用于比分参考和剧本扫描，不直接构成下注建议。"}</p>
-      <div class="plan-grid">
-        <div><h4>样本</h4><p class="muted">${summary.sample_count || 32} 场</p></div>
-        <div><h4>90分钟平局</h4><p class="muted">${pct(summary.draw_90min ?? 0.3125)}</p></div>
-        <div><h4>最高频比分</h4><p class="muted">1-1 · ${pct(summary.score_1_1 ?? 0.1875)}</p></div>
-        <div><h4>2-1 型</h4><p class="muted">${pct(summary.score_2_1_type ?? 0.15625)}</p></div>
-        <div><h4>2-0 型</h4><p class="muted">${pct(summary.score_2_0_type ?? 0.15625)}</p></div>
-        <div><h4>1-0 型</h4><p class="muted">${pct(summary.score_1_0_type ?? 0.09375)}</p></div>
-        <div><h4>0-0 / 2-2</h4><p class="muted">${pct(summary.score_0_0 ?? 0.0625)} / ${pct(summary.score_2_2 ?? 0.0625)}</p></div>
-        <div><h4>3-3</h4><p class="up">${pct(summary.score_3_3 ?? 0)} · 极端低频</p></div>
-        <div><h4>2球</h4><p class="muted">${pct(summary.two_goals ?? 0.34375)}</p></div>
-        <div><h4>3球 / 4球</h4><p class="muted">${pct(summary.three_goals ?? 0.21875)} / ${pct(summary.four_goals ?? 0.125)}</p></div>
-        <div><h4>小于2.5</h4><p class="muted">${pct(summary.under_2_5 ?? 0.5)}</p></div>
-        <div><h4>大于2.5</h4><p class="muted">${pct(summary.over_2_5 ?? 0.5)}</p></div>
-      </div>
-    </section>
-  `;
-}
-
 function upsetRobustnessHtml() {
   const item = state.upsetLabRobustness || {};
   const reasons = item.blocking_reasons || [];
@@ -879,7 +831,7 @@ function upsetLabHtml() {
       <section class="panel span-12 notice">
         冷门候选不会进入今日主推、正式推荐或小注候选；hard_ban 永远最高优先级。比分、3:3、半全场默认高风险。
       </section>
-      ${scorePriorCardHtml()}
+      ${scorePriorCardComponentHtml(state.scorePriors?.summary || state.practicalAdvice?.score_prior || {}, pct)}
       ${noOddsMode ? `<section class="panel span-12 notice">当前缺少赔率数据，已切换为冷门剧本扫描模式。以下内容仅用于判断冷门可能性，不计算EV，不建议下注。</section>` : ""}
       ${noSnapshotMode ? `<section class="panel span-12 notice">当前无赛前快照，已使用即时模型/静态球队数据进行轻量扫描。建议先生成赛前快照以提高准确度。</section>` : ""}
       <section class="panel span-3 metric"><span>总扫描候选</span><strong>${summary.candidate_count || 0}</strong><div class="muted">${summary.warning || "等待生成"}</div></section>
@@ -1018,6 +970,7 @@ function reviewSummaryHtml() {
 function dailyReviewSummaryHtml() {
   const item = state.dailyReviewSummary;
   if (!item) return "";
+  const guard = item.overfit_guard || {};
   const playText = (item.by_play_type || []).map(row =>
     `${row.play_type} ${row.corrected_hit_count}/${row.prediction_count}`
   ).join("；");
@@ -1032,6 +985,9 @@ function dailyReviewSummaryHtml() {
       </div>
       <p class="muted">主要问题：${(item.main_findings || []).join("；") || "-"}</p>
       <p class="muted">建议调整：${(item.model_adjustments_recommended || []).join("；") || "-"}</p>
+      <div class="notice">${guard.message || "当前复盘样本较少，仅作为观察记录，不会自动修改模型或推荐规则。"}</div>
+      <p class="muted">复盘标签：${(item.review_notes || []).join("；") || "-"}</p>
+      <p class="muted">禁止生成硬规则：${(item.forbidden_rules || []).join("；") || "-"}</p>
     </section>
   `;
 }
@@ -1241,7 +1197,7 @@ function todayPlanHtml() {
       <section class="panel span-3 metric"><span>最大亏损</span><strong>${plan ? Math.round(plan.max_loss) : "-"}</strong><div class="muted">触发后停止下注</div></section>
       <section class="panel span-3 metric"><span>串关上限</span><strong>${plan ? Math.round(comboBudget) : "-"}</strong><div class="muted">${bankroll.combo || "不超过今日预算 20%-25%"}</div></section>
       <section class="panel span-3 metric"><span>方案口径</span><strong>实战</strong><div class="muted">主推/小注/观察/禁买分层</div></section>
-      ${scorePriorCardHtml()}
+      ${scorePriorCardComponentHtml(state.scorePriors?.summary || state.practicalAdvice?.score_prior || {}, pct)}
       <section class="panel span-12 toolbar">
         <button class="btn" data-action="refresh-today">重新生成今日方案</button>
         <button class="btn secondary" data-action="refresh-core">刷新赔率并重算</button>
@@ -1293,7 +1249,10 @@ function practicalScoreRows(rows = []) {
       <td>${(item.scores || []).map(score => `<div>模型 ${pct(score.model_probability ?? score.probability ?? 0)} · 先验 ${pct(score.prior_probability ?? 0)} · 权重 ${pct(score.prior_weight ?? 0)}</div>`).join("") || "-"}</td>
       <td>${(item.scores || []).map(score => `<div>${score.is_extreme_score ? "极端比分" : score.is_high_frequency_shape ? "高频形态" : "普通形态"} · ${score.score_shape_key || "-"}</div>`).join("") || "-"}</td>
       <td>${(item.scores || []).map(score => `<div>${score.spf_consistent ? "胜平负一致" : "胜平负不一致"} · ${score.total_goals_consistent ? "总进球一致" : "总进球不一致"}</div>`).join("") || "-"}</td>
-      <td class="muted">${(item.scores || []).map(score => `<div>${score.risk || ""}</div>`).join("") || item.reason || "比分波动大，仅供参考，不建议作为主买项。"}</td>
+      <td class="muted">
+        ${(item.scores || []).map(score => `<div>${score.risk || ""}</div>`).join("") || item.reason || "比分波动大，仅供参考，不建议作为主买项。"}
+        ${item.diversity_guard?.warning ? `<div class="warn">${item.diversity_guard.warning}</div>` : ""}
+      </td>
     </tr>
   `).join("");
 }
@@ -1314,7 +1273,7 @@ function practicalAdviceHtml() {
         </div>
         <div class="muted">淘汰赛主动模式：首发不作为分层条件，正EV方向更积极进入主推/小注；hard_ban、负EV、严重赔率异常仍直接拦截。比分波动大，仅供参考。</div>
       </section>
-      ${scorePriorCardHtml()}
+      ${scorePriorCardComponentHtml(state.scorePriors?.summary || state.practicalAdvice?.score_prior || {}, pct)}
       <section class="panel span-12 table-panel">
         <h3>今日主推</h3>
         <div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>选择</th><th>模型</th><th>市场</th><th>赔率</th><th>EV</th><th>数据</th><th>建议仓位</th></tr></thead><tbody>${practicalRows(advice.main || [], "今日暂无主推。")}</tbody></table></div>
@@ -2093,7 +2052,7 @@ function externalSourcesHtml() {
     </tr>
   `).join("");
   return `
-    ${dataRefreshProgressHtml()}
+    ${dataRefreshProgressCardHtml(state.dataRefreshProgress)}
     <section class="panel span-12">
       <h3>免费数据源 Provider Registry</h3>
       <p class="muted">Key 只保存在本地设置中，页面不显示明文。网页抓取源只作为低可信补充，不当作官方强源。</p>
@@ -2411,6 +2370,7 @@ function viewHtml() {
   return `
     <div class="grid">
       ${systemStatusHtml()}
+      ${projectHealthCardHtml(state.projectHealth)}
       ${modelStatusCard()}
       ${sourceCards()}
       ${sourceHealthHtml()}
@@ -2471,8 +2431,13 @@ function render(options = {}) {
             <button class="btn secondary" data-action="refresh-external">全局刷新</button>
           </div>
         </div>
-        ${refreshStatusHtml()}
-        ${state.busy && state.dataRefreshProgress ? dataRefreshProgressHtml(true) : ""}
+        ${refreshStatusBarHtml({
+          busy: state.busy,
+          message: state.message,
+          refreshMeta: state.refreshMeta,
+          status: state.status
+        })}
+        ${state.busy && state.dataRefreshProgress ? dataRefreshProgressCardHtml(state.dataRefreshProgress, true) : ""}
         ${viewHtml()}
       </main>
     </div>

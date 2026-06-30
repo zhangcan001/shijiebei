@@ -15,6 +15,7 @@ use crate::services::odds_service::classify_anomaly;
 use crate::services::recommendation_service::{
     action_advice, apply_quality_and_play_rules, play_type_risk_level, quality_action,
 };
+use crate::services::review_guard_service::{review_overfit_guard, score_diversity_guard};
 use crate::services::score_prior_service::{
     apply_score_prior_adjustment, get_score_prior_rankings, load_worldcup_knockout_score_priors,
     score_prior_bonus, score_prior_summary,
@@ -37,6 +38,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tauri::{AppHandle, Emitter};
 use zip::write::SimpleFileOptions;
+
+mod system_commands;
 
 const SPORTTERY_URL: &str = "https://webapi.sporttery.cn/gateway/uniform/football/getMatchCalculatorV1.qry?channel=1&poolCode=had,hhad,crs,ttg,hafu";
 const SPORTTERY_INJURY_URL: &str =
@@ -5603,6 +5606,7 @@ async fn daily_review_summary(app: AppHandle, date: Option<String>) -> Result<Va
             })
         })
         .collect::<Vec<_>>();
+    let guard = review_overfit_guard(by_match.len(), 1);
     Ok(json!({
         "date": date_prefix,
         "match_count": by_match.len(),
@@ -5622,7 +5626,21 @@ async fn daily_review_summary(app: AppHandle, date: Option<String>) -> Result<Va
             "总进球重点观察2/3球区间",
             "让球不穿盘方向进入重点复盘",
             "盘口降赔需要区分市场支持与热门热度误导"
-        ]
+        ],
+        "review_notes": [
+            "当日出现两场1:1，需关注冷平风险",
+            "强队不穿盘风险存在",
+            "总进球2/3球区间值得观察",
+            "比分模块低估弱队进球概率，需继续观察"
+        ],
+        "forbidden_rules": [
+            "淘汰赛默认1:1",
+            "强队热门默认冷平",
+            "强队让球默认不穿盘",
+            "总进球默认2球",
+            "弱队默认必进球"
+        ],
+        "overfit_guard": guard
     }))
 }
 
@@ -8404,6 +8422,12 @@ async fn worldcup_practical_advice(app: AppHandle) -> Result<Value, String> {
             })
             .map(|item| item.pick.clone())
             .unwrap_or_default();
+        let draw_prob = analysis
+            .had
+            .iter()
+            .find(|item| item.pick == "平局")
+            .map(|item| item.probability)
+            .unwrap_or(0.0);
         let ttg_pick = analysis
             .ttg
             .iter()
@@ -8501,6 +8525,7 @@ async fn worldcup_practical_advice(app: AppHandle) -> Result<Value, String> {
         });
         refs.truncate(3);
         if !refs.is_empty() {
+            let diversity_guard = score_diversity_guard(&refs, draw_prob);
             score_refs.push(json!({
                 "match_id": analysis.match_id,
                 "match_time": analysis.match_time,
@@ -8508,6 +8533,7 @@ async fn worldcup_practical_advice(app: AppHandle) -> Result<Value, String> {
                 "market": "CRS 比分参考",
                 "category": "比分参考",
                 "scores": refs,
+                "diversity_guard": diversity_guard,
                 "reason": "比分波动大，仅供参考，不建议作为主买项。"
             }));
         }
@@ -11230,6 +11256,7 @@ pub fn run_app() {
             export_strategy_diagnostics,
             open_backup_dir,
             get_system_status,
+            system_commands::get_project_health_report,
             collect_worldcup_pre_match_snapshot,
             settle_bet_recommendations,
             export_worldcup_training_samples,
@@ -11757,7 +11784,7 @@ mod tests {
                 .get("prior_weight")
                 .and_then(Value::as_f64)
                 .unwrap(),
-            0.25
+            0.20
         );
         let adjusted = high_quality
             .get("adjusted_probability")
@@ -11770,10 +11797,74 @@ mod tests {
                 .get("prior_weight")
                 .and_then(Value::as_f64)
                 .unwrap(),
-            0.40
+            0.30
         );
         let score_33 = apply_score_prior_adjustment(&priors, "3:3", 0.02, 80.0, 70.0, 0.10);
         assert_eq!(score_33.get("penalty").and_then(Value::as_f64), Some(0.35));
+    }
+
+    #[test]
+    fn review_overfit_guard_blocks_single_day_small_sample() {
+        let guard = review_overfit_guard(3, 1);
+        assert_eq!(
+            guard.get("review_note_only").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            guard
+                .get("candidate_adjustment_allowed")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert!(guard
+            .get("forbidden_outputs")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .any(|item| item.as_str() == Some("score_rule")));
+    }
+
+    #[test]
+    fn review_overfit_guard_requires_three_match_days() {
+        let two_days = review_overfit_guard(30, 2);
+        assert_eq!(
+            two_days
+                .get("candidate_adjustment_allowed")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        let three_days = review_overfit_guard(30, 3);
+        assert_eq!(
+            three_days
+                .get("candidate_adjustment_allowed")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            three_days
+                .get("candidate_adjustment_status")
+                .and_then(Value::as_str),
+            Some("observation_only")
+        );
+    }
+
+    #[test]
+    fn score_diversity_guard_warns_when_11_lacks_draw_support() {
+        let scores = vec![
+            json!({"score": "1:1", "adjusted_probability": 0.16}),
+            json!({"score": "2:1", "adjusted_probability": 0.15}),
+            json!({"score": "1:0", "adjusted_probability": 0.14}),
+        ];
+        let guard = score_diversity_guard(&scores, 0.20);
+        assert_eq!(
+            guard.get("top1_is_1_1").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(guard
+            .get("warning")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .contains("不应仅因先验置顶"));
     }
 
     #[test]
