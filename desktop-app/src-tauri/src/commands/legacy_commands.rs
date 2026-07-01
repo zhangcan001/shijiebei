@@ -315,11 +315,15 @@ fn canonical_team_name(name: &str) -> String {
         (
             "民主刚果",
             &[
+                "congo",
                 "dr congo",
                 "congo dr",
                 "democratic republic of congo",
+                "democratic republic of the congo",
                 "刚果金",
+                "刚果民主共和国",
                 "congo kinshasa",
+                "congo-kinshasa",
             ],
         ),
         ("乌兹别克斯坦", &["uzbekistan"]),
@@ -1148,7 +1152,8 @@ fn poisson(k: u32, lambda: f64) -> f64 {
 }
 
 fn team_rank(team: &str) -> Option<i32> {
-    let clean = team.replace("（", "(").replace("）", ")");
+    let canonical = canonical_team_name(team);
+    let clean = canonical.replace("（", "(").replace("）", ")");
     let name = clean.split('(').next().unwrap_or(&clean).trim();
     let pairs = [
         ("法国", 1),
@@ -8252,7 +8257,13 @@ fn compact_json_top(value: &Value, limit: usize) -> String {
 }
 
 fn normalize_match_team_key(team: &str) -> String {
-    normalize(&canonical_team_name(team))
+    match canonical_team_name(team).as_str() {
+        "民主刚果" => "congo_dr".to_string(),
+        "比利时" => "belgium".to_string(),
+        "塞内加尔" => "senegal".to_string(),
+        "英格兰" => "england".to_string(),
+        other => normalize(other),
+    }
 }
 
 fn normalize_stage_for_export(raw_stage: &str, kickoff: &str, competition: &str) -> (String, bool) {
@@ -8281,17 +8292,24 @@ fn match_time_bucket_12h(time: &str) -> i64 {
         .unwrap_or(0)
 }
 
-fn normalize_match_key_from_parts(home: &str, away: &str, kickoff: &str) -> String {
-    format!(
-        "{}__{}__{}",
-        normalize_match_team_key(home),
-        normalize_match_team_key(away),
-        match_time_bucket_12h(kickoff)
-    )
+fn same_export_match(a: &MatchRow, b: &MatchRow) -> bool {
+    normalize_match_team_key(&a.home) == normalize_match_team_key(&b.home)
+        && normalize_match_team_key(&a.away) == normalize_match_team_key(&b.away)
+        && match (parse_time_as_utc(&a.time), parse_time_as_utc(&b.time)) {
+            (Some(left), Some(right)) => (left - right).num_seconds().abs() <= 12 * 3600,
+            _ => match_time_bucket_12h(&a.time) == match_time_bucket_12h(&b.time),
+        }
 }
 
-fn normalize_match_key(match_row: &MatchRow) -> String {
-    normalize_match_key_from_parts(&match_row.home, &match_row.away, &match_row.time)
+fn normalized_export_key(match_row: &MatchRow) -> String {
+    format!(
+        "{}__{}__{}",
+        normalize_match_team_key(&match_row.home),
+        normalize_match_team_key(&match_row.away),
+        parse_time_as_utc(&match_row.time)
+            .map(|value| (value.timestamp() / (12 * 3600)).to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    )
 }
 
 fn snapshot_has_model_probs(snapshot: Option<&PreMatchSnapshotRow>) -> bool {
@@ -8356,16 +8374,27 @@ fn snapshot_export_score(
     let before_kickoff = snapshot
         .map(|item| item.created_before_kickoff)
         .unwrap_or(false);
+    let has_fifa_rank = recommendations
+        .first()
+        .map(|item| team_rank(&item.match_label).is_some())
+        .unwrap_or(false)
+        || snapshot
+            .map(|item| {
+                team_rank(&item.home_team).is_some() && team_rank(&item.away_team).is_some()
+            })
+            .unwrap_or(false);
     let fallback = analysis.is_none() || match_id.starts_with("football-data-org-");
     data_quality
-        + if has_odds { 30.0 } else { 0.0 }
-        + if has_model { 30.0 } else { 0.0 }
-        + if has_simulation { 20.0 } else { 0.0 }
+        + if has_odds { 40.0 } else { 0.0 }
+        + if has_model { 40.0 } else { 0.0 }
+        + if has_simulation { 30.0 } else { 0.0 }
         + if is_final { 20.0 } else { 0.0 }
         + if before_kickoff { 10.0 } else { 0.0 }
-        - if fallback { 30.0 } else { 0.0 }
-        - if has_odds { 0.0 } else { 20.0 }
-        - if has_model { 0.0 } else { 20.0 }
+        + if has_fifa_rank { 10.0 } else { 0.0 }
+        - if fallback { 50.0 } else { 0.0 }
+        - if has_odds { 0.0 } else { 30.0 }
+        - if has_model { 0.0 } else { 30.0 }
+        - if has_simulation { 0.0 } else { 10.0 }
 }
 
 fn movement_summary_for_match(conn: &Connection, match_id: &str, limit: usize) -> String {
@@ -8424,10 +8453,9 @@ fn best_export_match_id_for<'a>(
     let Some(target) = matches.iter().find(|item| item.id == target_match_id) else {
         return (target_match_id.to_string(), 1, 0.0);
     };
-    let target_key = normalize_match_key(target);
     let mut candidates = matches
         .iter()
-        .filter(|item| normalize_match_key(item) == target_key)
+        .filter(|item| same_export_match(item, target))
         .map(|item| {
             let snapshot = pick_snapshot_for_match(snapshots, &item.id);
             let analysis = analyses
@@ -8458,10 +8486,8 @@ fn dedupe_matches_for_gpt_export(
     analyses: &[MatchAnalysis],
     recommendations: &[Recommendation],
 ) -> Vec<MatchRow> {
-    let mut grouped = BTreeMap::<String, MatchRow>::new();
-    let mut grouped_score = BTreeMap::<String, f64>::new();
+    let mut grouped = Vec::<(MatchRow, f64)>::new();
     for item in matches {
-        let key = normalize_match_key(&item);
         let snapshot = pick_snapshot_for_match(snapshots, &item.id);
         let analysis = analyses
             .iter()
@@ -8472,12 +8498,76 @@ fn dedupe_matches_for_gpt_export(
             .cloned()
             .collect::<Vec<_>>();
         let score = snapshot_export_score(&item.id, snapshot, analysis, &recs);
-        if score > *grouped_score.get(&key).unwrap_or(&f64::MIN) {
-            grouped_score.insert(key.clone(), score);
-            grouped.insert(key, item);
+        if let Some((existing, existing_score)) = grouped
+            .iter_mut()
+            .find(|(existing, _)| same_export_match(existing, &item))
+        {
+            if score > *existing_score {
+                *existing = item;
+                *existing_score = score;
+            }
+        } else {
+            grouped.push((item, score));
         }
     }
-    grouped.into_values().collect::<Vec<_>>()
+    grouped
+        .into_iter()
+        .map(|(item, _)| item)
+        .collect::<Vec<_>>()
+}
+
+fn export_merge_source_ids(target_match_id: &str, matches: &[MatchRow]) -> Vec<String> {
+    let Some(target) = matches.iter().find(|item| item.id == target_match_id) else {
+        return vec![target_match_id.to_string()];
+    };
+    matches
+        .iter()
+        .filter(|item| same_export_match(item, target))
+        .map(|item| item.id.clone())
+        .collect::<Vec<_>>()
+}
+
+fn export_merge_reasons(
+    selected_match_id: &str,
+    snapshots: &[PreMatchSnapshotRow],
+    analyses: &[MatchAnalysis],
+    recommendations: &[Recommendation],
+) -> Vec<String> {
+    let snapshot = pick_snapshot_for_match(snapshots, selected_match_id);
+    let analysis = analyses
+        .iter()
+        .find(|analysis| analysis.match_id == selected_match_id);
+    let recs = recommendations
+        .iter()
+        .filter(|rec| rec.match_id == selected_match_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut reasons = Vec::new();
+    if recs.iter().any(|item| item.odds > 1.0) || snapshot_has_odds(snapshot) {
+        reasons.push("赔率完整".to_string());
+    }
+    if analysis.is_some() || snapshot_has_model_probs(snapshot) {
+        reasons.push("模型完整".to_string());
+    }
+    if analysis
+        .map(|item| item.lambda_home > 0.0 && item.lambda_away > 0.0)
+        .unwrap_or(false)
+    {
+        reasons.push("模拟信息有".to_string());
+    }
+    if snapshot
+        .map(|item| item.data_quality_score >= 65.0)
+        .unwrap_or(false)
+    {
+        reasons.push("数据质量更高".to_string());
+    }
+    if selected_match_id.starts_with("football-data-org-") {
+        reasons.push("仅有弱源可用".to_string());
+    }
+    if reasons.is_empty() {
+        reasons.push("综合评分最高".to_string());
+    }
+    reasons
 }
 
 fn sanitize_file_component(value: &str) -> String {
@@ -9073,6 +9163,12 @@ fn build_gpt_analysis_package_markdown(
     include_upset_lab: bool,
     include_raw_odds: bool,
     data_merge_note: &str,
+    dedupe_status: &str,
+    snapshot_selection_status: &str,
+    merged_source_count: usize,
+    merged_sources_text: &str,
+    selected_source: &str,
+    merge_reasons_text: &str,
 ) -> String {
     let match_id = match_row
         .map(|item| item.id.as_str())
@@ -9265,8 +9361,12 @@ fn build_gpt_analysis_package_markdown(
 
 ## 导出质量检查
 
-* 是否去重：{deduped}
-* 是否选择最佳快照：{best_snapshot_selected}
+* 去重状态：{dedupe_status}
+* 快照选择：{snapshot_selection_status}
+* 合并来源数：{merged_source_count}
+* 合并来源：{merged_sources_text}
+* 当前选择来源：{selected_source}
+* 合并原因：{merge_reasons_text}
 * 赔率完整性：{odds_completeness}
 * 模型完整性：{model_completeness}
 * 模拟信息：{simulation_status}
@@ -9460,16 +9560,12 @@ fn build_gpt_analysis_package_markdown(
         } else {
             missing_fields.join("、")
         },
-        deduped = if data_merge_note.trim().is_empty() {
-            "否"
-        } else {
-            "是"
-        },
-        best_snapshot_selected = if data_merge_note.trim().is_empty() {
-            "否"
-        } else {
-            "是"
-        },
+        dedupe_status = dedupe_status,
+        snapshot_selection_status = snapshot_selection_status,
+        merged_source_count = merged_source_count,
+        merged_sources_text = merged_sources_text,
+        selected_source = selected_source,
+        merge_reasons_text = merge_reasons_text,
         odds_completeness = odds_completeness,
         model_completeness = if model_complete { "完整" } else { "缺失" },
         simulation_status = if analysis.is_some() { "有" } else { "无" },
@@ -9516,6 +9612,24 @@ async fn build_gpt_analysis_package(
         best_export_match_id_for(&match_id, &matches, &snapshots, &analyses, &recommendations);
     let requested_match_id = match_id;
     let match_id = resolved_match_id;
+    let merged_sources = export_merge_source_ids(&requested_match_id, &matches);
+    let merge_reasons = export_merge_reasons(&match_id, &snapshots, &analyses, &recommendations);
+    let dedupe_status = if merge_count > 1 {
+        "已去重"
+    } else {
+        "无需去重"
+    };
+    let snapshot_selection_status = if merge_count > 1 {
+        "已选择最佳快照"
+    } else {
+        "仅一个快照"
+    };
+    let merged_sources_text = if merged_sources.is_empty() {
+        "-".to_string()
+    } else {
+        merged_sources.join("、")
+    };
+    let merge_reasons_text = merge_reasons.join("、");
     let upset_candidates = get_upset_lab_candidates(app.clone(), None, None, None)
         .await
         .unwrap_or_default();
@@ -9545,13 +9659,24 @@ async fn build_gpt_analysis_package(
         if merge_count > 1 {
             "本场匹配到多个来源，已优先选择有赔率/模型/模拟信息的快照。其他来源仅作为补充，不重复导出。"
         } else {
-            ""
+            "本场只有一个导出来源，无需去重。"
         },
+        dedupe_status,
+        snapshot_selection_status,
+        merge_count,
+        &merged_sources_text,
+        &match_id,
+        &merge_reasons_text,
     );
     Ok(json!({
         "match_id": match_id,
         "requested_match_id": requested_match_id,
         "merged_source_count": merge_count,
+        "merged_sources": merged_sources,
+        "selected_source": match_id,
+        "merge_reasons": merge_reasons,
+        "dedupe_status": dedupe_status,
+        "snapshot_selection_status": snapshot_selection_status,
         "export_score": export_score,
         "markdown": markdown,
         "has_snapshot": snapshot.is_some(),
@@ -9768,6 +9893,21 @@ async fn export_gpt_today_packages(
     let dir = gpt_exports_dir(&app)?;
     let mut files = Vec::new();
     let mut warnings = Vec::new();
+    let mut key_counts = BTreeMap::<String, usize>::new();
+    for item in &open_matches {
+        *key_counts.entry(normalized_export_key(item)).or_default() += 1;
+    }
+    let duplicate_keys = key_counts
+        .iter()
+        .filter(|(_, count)| **count > 1)
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    if !duplicate_keys.is_empty() {
+        warnings.push(format!(
+            "export_duplicate_unresolved：{}",
+            duplicate_keys.join("；")
+        ));
+    }
     let split_files = request.split_files.unwrap_or(false);
     if split_files {
         for item in &open_matches {
@@ -9827,8 +9967,20 @@ async fn export_gpt_today_packages(
                 markdowns.push(markdown.to_string());
             }
         }
+        let duplicate_warning = if duplicate_keys.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "> 警告：发现重复比赛未合并：{}\n\n---\n\n",
+                duplicate_keys.join("；")
+            )
+        };
         let path = unique_markdown_path(&dir, &format!("GPT赛前分析包_{}_全部比赛", date));
-        fs::write(&path, markdowns.join("\n\n---\n\n")).map_err(|error| error.to_string())?;
+        fs::write(
+            &path,
+            format!("{}{}", duplicate_warning, markdowns.join("\n\n---\n\n")),
+        )
+        .map_err(|error| error.to_string())?;
         files.push(path.to_string_lossy().to_string());
     }
     Ok(json!({
@@ -16846,6 +16998,12 @@ mod tests {
             true,
             true,
             "",
+            "无需去重",
+            "仅一个快照",
+            1,
+            "match-1",
+            "match-1",
+            "综合评分最高",
         );
         assert!(markdown.contains("赔率缺失，不能计算 EV"));
         assert!(markdown.contains("无赛前快照"));
@@ -16862,8 +17020,11 @@ mod tests {
         assert_eq!(canonical_team_name("刚果金"), "民主刚果");
         assert_eq!(canonical_team_name("Congo DR"), "民主刚果");
         let first = test_match_row("football-data-org-537426", "英格兰", "民主刚果");
-        let second = test_match_row("2040352", "英格兰", "刚果金");
-        assert_eq!(normalize_match_key(&first), normalize_match_key(&second));
+        let mut second = test_match_row("2040352", "英格兰", "刚果金");
+        second.time = "2026-07-02 00:00:00".to_string();
+        assert!(same_export_match(&first, &second));
+        assert_eq!(normalize_match_team_key("Congo DR"), "congo_dr");
+        assert_eq!(normalize_match_team_key("刚果民主共和国"), "congo_dr");
     }
 
     #[test]
@@ -16891,6 +17052,37 @@ mod tests {
             dedupe_matches_for_gpt_export(matches, &snapshots, &analyses, &recommendations);
         assert_eq!(deduped.len(), 1);
         assert_eq!(deduped[0].id, "2040352");
+        assert_eq!(team_rank("刚果金"), Some(46));
+    }
+
+    #[test]
+    fn gpt_export_merges_belgium_senegal_duplicate_sources() {
+        let mut weak = test_match_row("football-data-org-537422", "Belgium", "Senegal");
+        weak.time = "2026-07-01T16:00:00Z".to_string();
+        let mut strong = test_match_row("2040353", "比利时", "塞内加尔");
+        strong.time = "2026-07-02 00:00:00".to_string();
+        let matches = vec![weak, strong];
+        let snapshots = vec![test_snapshot(
+            "2040353",
+            json!([{"market":"HAD","pick":"主胜","odds":1.8}]),
+        )];
+        let analyses = vec![test_analysis("2040353")];
+        let recommendations = vec![test_recommendation("2040353")];
+        let (best_id, merged_count, _score) = best_export_match_id_for(
+            "football-data-org-537422",
+            &matches,
+            &snapshots,
+            &analyses,
+            &recommendations,
+        );
+        assert_eq!(best_id, "2040353");
+        assert_eq!(merged_count, 2);
+        let deduped =
+            dedupe_matches_for_gpt_export(matches, &snapshots, &analyses, &recommendations);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].id, "2040353");
+        assert_eq!(team_rank("Belgium"), Some(9));
+        assert_eq!(team_rank("Senegal"), Some(14));
     }
 
     #[test]
@@ -16918,12 +17110,55 @@ mod tests {
             true,
             true,
             "本场匹配到多个来源，已优先选择有赔率/模型/模拟信息的快照。其他来源仅作为补充，不重复导出。",
+            "已去重",
+            "已选择最佳快照",
+            2,
+            "football-data-org-537426、2040352",
+            "2040352",
+            "赔率完整、模型完整、模拟信息有",
         );
         assert!(!markdown.contains("* 阶段：TIMED"));
         assert!(!markdown.contains("Selling"));
         assert!(markdown.contains("* 阶段：淘汰赛（待确认轮次）"));
         assert!(markdown.contains("赔率原始数据存在，但结构化表格未完全解析"));
-        assert!(markdown.contains("是否去重：是"));
+        assert!(markdown.contains("* 去重状态：已去重"));
+        assert!(markdown.contains("* 快照选择：已选择最佳快照"));
+        assert!(markdown.contains("* 合并来源数：2"));
+        assert!(markdown.contains("* 当前选择来源：2040352"));
+    }
+
+    #[test]
+    fn gpt_export_single_source_uses_neutral_dedupe_status() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "create table odds_snapshots(id integer, match_id text, created_at text);
+             create table odds_movements(id integer, match_id text, market text, pick text, direction text, delta_pct real);",
+        )
+        .unwrap();
+        let match_row = test_match_row("2040352", "英格兰", "刚果金");
+        let analysis = test_analysis("2040352");
+        let markdown = build_gpt_analysis_package_markdown(
+            Some(&match_row),
+            Some(&analysis),
+            None,
+            &[],
+            &[],
+            &conn,
+            true,
+            true,
+            true,
+            "本场只有一个导出来源，无需去重。",
+            "无需去重",
+            "仅一个快照",
+            1,
+            "2040352",
+            "2040352",
+            "综合评分最高",
+        );
+        assert!(markdown.contains("* 去重状态：无需去重"));
+        assert!(markdown.contains("* 快照选择：仅一个快照"));
+        assert!(!markdown.contains("* 是否去重：否"));
+        assert!(!markdown.contains("* 是否选择最佳快照：否"));
     }
 
     #[test]
@@ -16958,6 +17193,12 @@ mod tests {
             true,
             true,
             "",
+            "无需去重",
+            "仅一个快照",
+            1,
+            "2040352",
+            "2040352",
+            "综合评分最高",
         );
         assert!(markdown.contains("* 赔率快照次数：2"));
         assert!(markdown.contains("* 赔率记录条数：3"));
