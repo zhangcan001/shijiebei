@@ -6847,6 +6847,13 @@ fn match_is_open_for_recommendation(
     !match_time_is_past(match_time)
 }
 
+fn snapshot_is_open_for_recommendation(
+    snapshot: &PreMatchSnapshotRow,
+    matches: &[MatchRow],
+) -> bool {
+    match_is_open_for_recommendation(&snapshot.match_id, &snapshot.kickoff_time, matches)
+}
+
 fn kickoff_is_future(kickoff_time: &str, snapshot_time: &str) -> bool {
     match (
         parse_time_as_utc(kickoff_time),
@@ -8847,6 +8854,7 @@ async fn worldcup_practical_advice(app: AppHandle) -> Result<Value, String> {
         .await
         .unwrap_or_default();
     let analyses = list_match_analyses(app.clone()).await.unwrap_or_default();
+    let matches = list_matches(app.clone()).await.unwrap_or_default();
     let mut main = Vec::new();
     let mut small = Vec::new();
     let mut watch = Vec::new();
@@ -8872,6 +8880,9 @@ async fn worldcup_practical_advice(app: AppHandle) -> Result<Value, String> {
     };
 
     for snapshot in preferred_snapshots.values() {
+        if !snapshot_is_open_for_recommendation(snapshot, &matches) {
+            continue;
+        }
         snapshot_match_ids.insert(snapshot.match_id.clone(), true);
         for row in snapshot_practical_rows(snapshot) {
             push_practical_row(
@@ -8886,6 +8897,9 @@ async fn worldcup_practical_advice(app: AppHandle) -> Result<Value, String> {
     }
 
     for item in &recommendations {
+        if !match_is_open_for_recommendation(&item.match_id, &item.match_time, &matches) {
+            continue;
+        }
         if snapshot_match_ids.contains_key(&item.match_id) {
             continue;
         }
@@ -8935,6 +8949,9 @@ async fn worldcup_practical_advice(app: AppHandle) -> Result<Value, String> {
     }
 
     for analysis in analyses {
+        if !match_is_open_for_recommendation(&analysis.match_id, &analysis.match_time, &matches) {
+            continue;
+        }
         let had_pick = analysis
             .had
             .iter()
@@ -11965,6 +11982,48 @@ mod tests {
             "2099-06-30T12:00:00Z",
             &[]
         ));
+    }
+
+    #[test]
+    fn past_snapshot_is_not_open_for_practical_advice() {
+        let snapshot = PreMatchSnapshotRow {
+            id: 99,
+            match_id: "m-past".to_string(),
+            external_fixture_id: String::new(),
+            provider_match_id: String::new(),
+            snapshot_time: "2026-06-30T00:00:00Z".to_string(),
+            kickoff_time: "2026-06-30T04:30:00Z".to_string(),
+            home_team: "德国".to_string(),
+            away_team: "巴拉圭".to_string(),
+            competition: "世界杯".to_string(),
+            season: "2026".to_string(),
+            stage: "淘汰赛".to_string(),
+            model_version: "model".to_string(),
+            model_probs_json: json!([]),
+            calibrated_probs_json: json!([]),
+            worldcup_correction_action: String::new(),
+            odds_json: json!([]),
+            market_probs_json: json!([]),
+            ev_json: json!([]),
+            data_quality_score: 90.0,
+            lineup_status: String::new(),
+            lineup_confidence: 0.0,
+            injury_status: String::new(),
+            injury_confidence: 0.0,
+            risk_tags_json: json!([]),
+            final_decision: "small_stake".to_string(),
+            decision_reason_json: json!([]),
+            paper_strategy_id: String::new(),
+            paper_trade_enabled: false,
+            raw_features_json: json!({}),
+            created_before_kickoff: true,
+            is_final_pre_match: false,
+            is_final_snapshot: false,
+            created_at: String::new(),
+            updated_at: String::new(),
+            settlement: None,
+        };
+        assert!(!snapshot_is_open_for_recommendation(&snapshot, &[]));
     }
 
     #[test]
