@@ -8397,6 +8397,162 @@ fn snapshot_has_odds(snapshot: Option<&PreMatchSnapshotRow>) -> bool {
         .unwrap_or(false)
 }
 
+#[derive(Debug, Clone)]
+struct GptOddsCompleteness {
+    status_key: &'static str,
+    status_label: &'static str,
+    missing_items: Vec<String>,
+    warning: &'static str,
+}
+
+fn selection_export_fields(
+    recommendations: &[Recommendation],
+    analysis: Option<&MatchAnalysis>,
+    market_prefix: &str,
+    pick: &str,
+) -> (bool, bool, bool) {
+    let rec = recommendation_lookup(recommendations, market_prefix, pick);
+    let prob = analysis.and_then(|analysis| match market_prefix {
+        "HAD" => prob_for(&analysis.had, pick),
+        "HHAD" => prob_for(&analysis.hhad, pick),
+        "TTG" => prob_for(&analysis.ttg, pick),
+        "CRS" => prob_for(&analysis.scores, pick),
+        _ => None,
+    });
+    let has_odds = rec.map(|item| item.odds > 1.0).unwrap_or(false)
+        || prob
+            .and_then(|item| item.sporttery_odds)
+            .map(|value| value > 1.0)
+            .unwrap_or(false);
+    let has_market_prob = rec.map(|item| item.fair_prob > 0.0).unwrap_or(false)
+        || prob.and_then(|item| item.sporttery_prob).is_some();
+    let has_model_prob = rec.map(|item| item.model_prob > 0.0).unwrap_or(false)
+        || prob.map(|item| item.probability > 0.0).unwrap_or(false);
+    let has_ev = rec
+        .map(|item| item.expected_return.is_finite())
+        .unwrap_or(false)
+        || (has_odds && has_model_prob);
+    (has_odds, has_market_prob, has_ev)
+}
+
+fn structured_odds_count(
+    recommendations: &[Recommendation],
+    analysis: Option<&MatchAnalysis>,
+    market_prefix: &str,
+) -> usize {
+    let mut picks = recommendations
+        .iter()
+        .filter(|item| item.market.starts_with(market_prefix) && item.odds > 1.0)
+        .map(|item| item.pick.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(analysis) = analysis {
+        let items = match market_prefix {
+            "HAD" => &analysis.had,
+            "HHAD" => &analysis.hhad,
+            "TTG" => &analysis.ttg,
+            "CRS" => &analysis.scores,
+            _ => return picks.len(),
+        };
+        for item in items {
+            if item
+                .sporttery_odds
+                .map(|value| value > 1.0)
+                .unwrap_or(false)
+            {
+                picks.insert(item.pick.clone());
+            }
+        }
+    }
+    picks.len()
+}
+
+fn classify_odds_completeness(
+    recommendations: &[Recommendation],
+    analysis: Option<&MatchAnalysis>,
+    has_raw_odds: bool,
+) -> GptOddsCompleteness {
+    let had_picks = ["主胜", "平局", "客胜"];
+    let hhad_picks = ["让胜", "让平", "让负"];
+    let had_fields = had_picks
+        .iter()
+        .map(|pick| selection_export_fields(recommendations, analysis, "HAD", pick))
+        .collect::<Vec<_>>();
+    let hhad_fields = hhad_picks
+        .iter()
+        .map(|pick| selection_export_fields(recommendations, analysis, "HHAD", pick))
+        .collect::<Vec<_>>();
+    let had_odds_complete = had_fields.iter().all(|(odds, _, _)| *odds);
+    let had_market_complete = had_fields.iter().all(|(_, market_prob, _)| *market_prob);
+    let had_ev_complete = had_fields.iter().all(|(_, _, ev)| *ev);
+    let hhad_odds_complete = hhad_fields.iter().all(|(odds, _, _)| *odds);
+    let hhad_market_complete = hhad_fields.iter().all(|(_, market_prob, _)| *market_prob);
+    let hhad_ev_complete = hhad_fields.iter().all(|(_, _, ev)| *ev);
+    let ttg_odds_count = structured_odds_count(recommendations, analysis, "TTG");
+    let crs_odds_count = structured_odds_count(recommendations, analysis, "CRS");
+    let ttg_complete = ttg_odds_count >= 6;
+    let crs_complete = crs_odds_count >= 5;
+    let mut missing_items = Vec::new();
+    if !had_odds_complete {
+        missing_items.push("HAD odds".to_string());
+    }
+    if !had_market_complete {
+        missing_items.push("HAD market_prob".to_string());
+    }
+    if !had_ev_complete {
+        missing_items.push("HAD EV".to_string());
+    }
+    if !hhad_odds_complete {
+        missing_items.push("HHAD odds".to_string());
+    }
+    if !hhad_market_complete {
+        missing_items.push("HHAD market_prob".to_string());
+    }
+    if !hhad_ev_complete {
+        missing_items.push("HHAD EV".to_string());
+    }
+    if !ttg_complete {
+        missing_items.push("TTG odds".to_string());
+    }
+    if !crs_complete {
+        missing_items.push("CRS odds".to_string());
+    }
+    let structured_any = recommendations.iter().any(|item| item.odds > 1.0)
+        || structured_odds_count(recommendations, analysis, "HAD") > 0
+        || structured_odds_count(recommendations, analysis, "HHAD") > 0
+        || ttg_odds_count > 0
+        || crs_odds_count > 0;
+    let complete = had_odds_complete
+        && had_market_complete
+        && had_ev_complete
+        && hhad_odds_complete
+        && hhad_market_complete
+        && hhad_ev_complete
+        && ttg_complete
+        && crs_complete;
+    if complete {
+        return GptOddsCompleteness {
+            status_key: "complete",
+            status_label: "完整",
+            missing_items: Vec::new(),
+            warning: "",
+        };
+    }
+    if structured_any || has_raw_odds || analysis.is_some() {
+        return GptOddsCompleteness {
+            status_key: "partial",
+            status_label: "部分",
+            missing_items,
+            warning: "⚠ 赔率仅部分完整，EV 和市场概率判断需谨慎。",
+        };
+    }
+    GptOddsCompleteness {
+        status_key: "missing",
+        status_label: "缺失",
+        missing_items,
+        warning: "⚠ 赔率缺失，不能计算可靠 EV。",
+    }
+}
+
 fn value_market_count(value: &Value) -> usize {
     match value {
         Value::Array(items) => items
@@ -9295,15 +9451,13 @@ fn build_gpt_analysis_package_markdown(
                 .unwrap_or_else(|| "-".to_string())
         });
     let movement_summary = movement_summary_for_match(conn, match_id, 5);
-    let has_odds = recommendations.iter().any(|item| item.odds > 1.0)
-        || snapshot
-            .map(|item| {
-                json_has_content(&item.odds_json)
-                    || json_has_content(&item.market_probs_json)
-                    || json_has_content(&item.ev_json)
-            })
-            .unwrap_or(false);
-    let missing_odds_note = if has_odds {
+    let has_raw_odds = snapshot_has_odds(snapshot);
+    let odds_completeness_report =
+        classify_odds_completeness(recommendations, analysis, has_raw_odds);
+    let has_odds = odds_completeness_report.status_key != "missing";
+    let missing_odds_note = if odds_completeness_report.status_key == "complete" {
+        "赔率结构化完整"
+    } else if has_odds {
         if recommendations.is_empty()
             && snapshot
                 .map(|item| json_has_content(&item.odds_json))
@@ -9397,11 +9551,7 @@ fn build_gpt_analysis_package_markdown(
         });
     let model_complete = analysis.is_some() || snapshot_has_model_probs(snapshot);
     let mut missing_fields = Vec::<String>::new();
-    if !has_odds {
-        missing_fields.push("odds 缺失".to_string());
-        missing_fields.push("market_prob 缺失".to_string());
-        missing_fields.push("ev 缺失".to_string());
-    }
+    missing_fields.extend(odds_completeness_report.missing_items.iter().cloned());
     if !model_complete {
         missing_fields.push("model 缺失".to_string());
     }
@@ -9423,9 +9573,14 @@ fn build_gpt_analysis_package_markdown(
     {
         missing_fields.push("final snapshot 否".to_string());
     }
+    let snapshot_risk_text = snapshot
+        .map(|item| compact_json_text(&item.risk_tags_json))
+        .unwrap_or_default();
     if recommendations
         .iter()
         .any(|item| item.risk_factors.contains("xG") || item.risk_factors.contains("统计"))
+        || snapshot_risk_text.contains("xG")
+        || snapshot_risk_text.contains("统计")
     {
         missing_fields.push("xG 缺失".to_string());
     }
@@ -9471,12 +9626,10 @@ fn build_gpt_analysis_package_markdown(
                 .map(|item| value_market_count(&item.market_probs_json))
                 .unwrap_or(0),
         );
-    let odds_completeness = if !has_odds {
-        "缺失"
-    } else if recommendations.is_empty() {
-        "部分"
+    let odds_missing_items = if odds_completeness_report.missing_items.is_empty() {
+        "-".to_string()
     } else {
-        "完整"
+        odds_completeness_report.missing_items.join("、")
     };
     let snapshot_warning = if odds_batch_count == 0 && odds_count > 0 {
         "赔率记录存在，但快照次数统计缺失，请检查数据源映射。"
@@ -9504,6 +9657,7 @@ fn build_gpt_analysis_package_markdown(
 * 当前选择来源：{selected_source}
 * 合并原因：{merge_reasons_text}
 * 赔率完整性：{odds_completeness}
+* 赔率缺失项：{odds_missing_items}
 * 模型完整性：{model_completeness}
 * 模拟信息：{simulation_status}
 * 阶段字段：{stage_status}
@@ -9512,6 +9666,7 @@ fn build_gpt_analysis_package_markdown(
 * final snapshot 原因：{final_snapshot_reason}
 
 {low_quality_warning}
+{odds_quality_warning}
 
 > 数据源合并提示：{merge_note}
 
@@ -9704,7 +9859,9 @@ fn build_gpt_analysis_package_markdown(
         merged_sources_text = merged_sources_text,
         selected_source = selected_source,
         merge_reasons_text = merge_reasons_text,
-        odds_completeness = odds_completeness,
+        odds_completeness = odds_completeness_report.status_label,
+        odds_missing_items = odds_missing_items,
+        odds_quality_warning = odds_completeness_report.warning,
         model_completeness = if model_complete { "完整" } else { "缺失" },
         simulation_status = if analysis.is_some() { "有" } else { "无" },
         stage_status = if stage_is_normal {
@@ -9785,6 +9942,8 @@ async fn build_gpt_analysis_package(
         .filter(|item| value_match_id(item) == match_id)
         .cloned()
         .collect::<Vec<_>>();
+    let odds_completeness_report =
+        classify_odds_completeness(&recs, analysis, snapshot_has_odds(snapshot));
     let markdown = build_gpt_analysis_package_markdown(
         match_row,
         analysis,
@@ -9821,6 +9980,9 @@ async fn build_gpt_analysis_package(
         "has_snapshot": snapshot.is_some(),
         "is_final_snapshot": snapshot.map(|item| item.is_final_pre_match).unwrap_or(false),
         "has_odds": recs.iter().any(|item| item.odds > 1.0) || snapshot_has_odds(snapshot),
+        "odds_completeness": odds_completeness_report.status_key,
+        "odds_completeness_label": odds_completeness_report.status_label,
+        "odds_missing_items": odds_completeness_report.missing_items,
         "has_model_probs": analysis.is_some() || snapshot_has_model_probs(snapshot),
         "has_simulation": analysis.map(|item| item.lambda_home > 0.0 && item.lambda_away > 0.0).unwrap_or(false),
         "data_quality": snapshot.map(|item| item.data_quality_score).unwrap_or_else(|| recs.first().map(|item| item.data_score).unwrap_or(0.0)),
@@ -9848,12 +10010,31 @@ fn gpt_today_overview_markdown(packages: &[Value]) -> String {
                 .unwrap_or(false)
         })
         .count();
-    let odds_count = packages
+    let odds_complete_count = packages
         .iter()
         .filter(|item| {
-            item.get("has_odds")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
+            item.get("odds_completeness")
+                .and_then(Value::as_str)
+                .unwrap_or("missing")
+                == "complete"
+        })
+        .count();
+    let odds_partial_count = packages
+        .iter()
+        .filter(|item| {
+            item.get("odds_completeness")
+                .and_then(Value::as_str)
+                .unwrap_or("missing")
+                == "partial"
+        })
+        .count();
+    let odds_missing_count = packages
+        .iter()
+        .filter(|item| {
+            item.get("odds_completeness")
+                .and_then(Value::as_str)
+                .unwrap_or("missing")
+                == "missing"
         })
         .count();
     let model_count = packages
@@ -9896,7 +10077,9 @@ fn gpt_today_overview_markdown(packages: &[Value]) -> String {
 - 比赛数量：{match_count}
 - 已去重比赛数：{deduped_count}
 - final snapshot 数量：{final_count}
-- 赔率完整比赛数：{odds_count}
+- 赔率完整比赛数：{odds_complete_count}
+- 赔率部分比赛数：{odds_partial_count}
+- 赔率缺失比赛数：{odds_missing_count}
 - 模型完整比赛数：{model_count}
 - 模拟完整比赛数：{simulation_count}
 - 数据质量低于 65 的比赛：{low_quality}
@@ -17259,7 +17442,8 @@ mod tests {
             "match-1",
             "综合评分最高",
         );
-        assert!(markdown.contains("赔率缺失，不能计算 EV"));
+        assert!(markdown.contains("* 赔率完整性：部分"));
+        assert!(markdown.contains("⚠ 赔率仅部分完整，EV 和市场概率判断需谨慎。"));
         assert!(markdown.contains("无赛前快照"));
         assert!(markdown.contains("请你作为赛前分析师"));
         assert!(markdown.contains("## 4. 模拟比赛信息"));
@@ -17379,6 +17563,127 @@ mod tests {
         assert!(markdown.contains("* 快照选择：已选择最佳快照"));
         assert!(markdown.contains("* 合并来源数：2"));
         assert!(markdown.contains("* 当前选择来源：2040352"));
+    }
+
+    #[test]
+    fn gpt_odds_completeness_is_partial_when_had_structured_odds_are_missing() {
+        let mut analysis = test_analysis("arg-cpv");
+        analysis.match_label = "阿根廷 vs 佛得角".to_string();
+        analysis.had = vec![
+            ProbItem {
+                pick: "主胜".to_string(),
+                probability: 0.58,
+                fair_odds: 1.72,
+                sporttery_prob: None,
+                sporttery_odds: None,
+                probability_gap: None,
+            },
+            ProbItem {
+                pick: "平局".to_string(),
+                probability: 0.25,
+                fair_odds: 4.0,
+                sporttery_prob: None,
+                sporttery_odds: None,
+                probability_gap: None,
+            },
+            ProbItem {
+                pick: "客胜".to_string(),
+                probability: 0.17,
+                fair_odds: 5.88,
+                sporttery_prob: None,
+                sporttery_odds: None,
+                probability_gap: None,
+            },
+        ];
+        let report = classify_odds_completeness(&[], Some(&analysis), true);
+        assert_eq!(report.status_key, "partial");
+        assert_ne!(report.status_key, "complete");
+        assert!(report.missing_items.contains(&"HAD odds".to_string()));
+        assert!(report
+            .missing_items
+            .contains(&"HAD market_prob".to_string()));
+        assert!(report.missing_items.contains(&"HAD EV".to_string()));
+    }
+
+    #[test]
+    fn gpt_odds_completeness_is_missing_when_no_structured_or_raw_odds_exist() {
+        let report = classify_odds_completeness(&[], None, false);
+        assert_eq!(report.status_key, "missing");
+        assert_eq!(report.status_label, "缺失");
+        assert!(report.warning.contains("不能计算可靠 EV"));
+    }
+
+    #[test]
+    fn gpt_markdown_marks_raw_odds_with_missing_structured_had_as_partial() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "create table odds_snapshots(id integer, match_id text, created_at text);
+             create table odds_movements(id integer, match_id text, market text, pick text, direction text, delta_pct real);",
+        )
+        .unwrap();
+        let mut match_row = test_match_row("arg-cpv", "阿根廷", "佛得角");
+        match_row.status = "1/16决赛".to_string();
+        let mut analysis = test_analysis("arg-cpv");
+        analysis.match_label = "阿根廷 vs 佛得角".to_string();
+        analysis.had = vec![
+            ProbItem {
+                pick: "主胜".to_string(),
+                probability: 0.58,
+                fair_odds: 1.72,
+                sporttery_prob: None,
+                sporttery_odds: None,
+                probability_gap: None,
+            },
+            ProbItem {
+                pick: "平局".to_string(),
+                probability: 0.25,
+                fair_odds: 4.0,
+                sporttery_prob: None,
+                sporttery_odds: None,
+                probability_gap: None,
+            },
+            ProbItem {
+                pick: "客胜".to_string(),
+                probability: 0.17,
+                fair_odds: 5.88,
+                sporttery_prob: None,
+                sporttery_odds: None,
+                probability_gap: None,
+            },
+        ];
+        let mut snapshot =
+            test_snapshot("arg-cpv", json!([{"market":"raw","pick":"raw","odds":1.5}]));
+        snapshot.home_team = "阿根廷".to_string();
+        snapshot.away_team = "佛得角".to_string();
+        snapshot.is_final_pre_match = false;
+        snapshot.lineup_status = "unknown".to_string();
+        snapshot.risk_tags_json = json!(["xG 缺失"]);
+        let markdown = build_gpt_analysis_package_markdown(
+            Some(&match_row),
+            Some(&analysis),
+            Some(&snapshot),
+            &[],
+            &[],
+            &conn,
+            true,
+            true,
+            true,
+            "",
+            "无需去重",
+            "仅一个快照",
+            1,
+            "arg-cpv",
+            "arg-cpv",
+            "综合评分最高",
+        );
+        assert!(markdown.contains("* 赔率完整性：部分"));
+        assert!(markdown.contains("* 赔率缺失项：HAD odds"));
+        assert!(markdown.contains("HAD market_prob"));
+        assert!(markdown.contains("HAD EV"));
+        assert!(markdown.contains("final snapshot 否"));
+        assert!(markdown.contains("lineup unknown"));
+        assert!(markdown.contains("⚠ 赔率仅部分完整，EV 和市场概率判断需谨慎。"));
+        assert!(!markdown.contains("* 赔率完整性：完整"));
     }
 
     #[test]
@@ -17549,7 +17854,7 @@ mod tests {
             json!({
                 "merged_source_count": 2,
                 "is_final_snapshot": true,
-                "has_odds": true,
+                "odds_completeness": "complete",
                 "has_model_probs": true,
                 "has_simulation": true,
                 "data_quality": 90.0
@@ -17557,17 +17862,28 @@ mod tests {
             json!({
                 "merged_source_count": 1,
                 "is_final_snapshot": false,
-                "has_odds": true,
+                "odds_completeness": "partial",
                 "has_model_probs": true,
                 "has_simulation": true,
                 "data_quality": 60.0
             }),
+            json!({
+                "merged_source_count": 1,
+                "is_final_snapshot": false,
+                "odds_completeness": "missing",
+                "has_model_probs": true,
+                "has_simulation": true,
+                "data_quality": 80.0
+            }),
         ];
         let overview = gpt_today_overview_markdown(&packages);
         assert!(overview.contains("# 今日 GPT 赛前分析包总览"));
-        assert!(overview.contains("- 比赛数量：2"));
+        assert!(overview.contains("- 比赛数量：3"));
         assert!(overview.contains("- 已去重比赛数：1"));
         assert!(overview.contains("- final snapshot 数量：1"));
+        assert!(overview.contains("- 赔率完整比赛数：1"));
+        assert!(overview.contains("- 赔率部分比赛数：1"));
+        assert!(overview.contains("- 赔率缺失比赛数：1"));
         assert!(overview.contains("- 数据质量低于 65 的比赛：1"));
     }
 
