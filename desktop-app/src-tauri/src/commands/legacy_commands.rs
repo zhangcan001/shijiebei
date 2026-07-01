@@ -4137,6 +4137,7 @@ async fn list_recommendations(app: AppHandle) -> Result<Vec<Recommendation>, Str
     let player_status_value = player_status_cache.as_ref().map(|record| &record.value);
     let result_rows = model_result_rows(&conn);
     let settings = load_model_settings(&conn);
+    let matches = list_matches(app.clone()).await.unwrap_or_default();
     let selections = sporttery_selections(&sporttery.value);
     let mut grouped: BTreeMap<String, Vec<OddsSelection>> = BTreeMap::new();
     for selection in selections {
@@ -4151,6 +4152,9 @@ async fn list_recommendations(app: AppHandle) -> Result<Vec<Recommendation>, Str
         let Some(first) = selections.first() else {
             continue;
         };
+        if !match_is_open_for_recommendation(&first.match_id, &first.match_time, &matches) {
+            continue;
+        }
         let (mut lambda_home, mut lambda_away, note) = if result_rows.is_empty() {
             rank_lambdas(&first.home, &first.away)
         } else {
@@ -6805,6 +6809,42 @@ fn parse_time_as_utc(value: &str) -> Option<DateTime<Utc>> {
                 .ok()
                 .map(|dt| DateTime::from_naive_utc_and_offset(dt, Utc))
         })
+}
+
+fn match_status_is_finished(status: &str) -> bool {
+    let lower = status.trim().to_ascii_lowercase();
+    let text = status.trim();
+    if lower.is_empty() || matches!(lower.as_str(), "timed" | "scheduled" | "not_started" | "ns") {
+        return false;
+    }
+    lower.contains("finish")
+        || lower == "ft"
+        || lower == "aet"
+        || lower == "pen"
+        || lower == "ended"
+        || text.contains("完场")
+        || text.contains("结束")
+        || text.contains("已结束")
+        || text.contains("赛果")
+}
+
+fn match_time_is_past(match_time: &str) -> bool {
+    parse_time_as_utc(match_time)
+        .map(|kickoff| kickoff <= Utc::now())
+        .unwrap_or(false)
+}
+
+fn match_is_open_for_recommendation(
+    match_id: &str,
+    match_time: &str,
+    matches: &[MatchRow],
+) -> bool {
+    if let Some(row) = matches.iter().find(|item| item.id == match_id) {
+        if match_status_is_finished(&row.status) || match_time_is_past(&row.time) {
+            return false;
+        }
+    }
+    !match_time_is_past(match_time)
 }
 
 fn kickoff_is_future(kickoff_time: &str, snapshot_time: &str) -> bool {
@@ -11864,6 +11904,49 @@ mod tests {
         assert!(!kickoff_is_future(
             "2026-06-30T12:00:00Z",
             "2026-06-30T21:01:00+09:00"
+        ));
+    }
+
+    #[test]
+    fn finished_matches_are_not_open_for_recommendation() {
+        let rows = vec![MatchRow {
+            id: "m1".to_string(),
+            match_num: "001".to_string(),
+            league: "世界杯".to_string(),
+            time: "2099-06-30T12:00:00Z".to_string(),
+            home: "主队".to_string(),
+            away: "客队".to_string(),
+            status: "完场".to_string(),
+        }];
+        assert!(!match_is_open_for_recommendation(
+            "m1",
+            "2099-06-30T12:00:00Z",
+            &rows
+        ));
+        assert!(match_status_is_finished("FINISHED"));
+        assert!(match_status_is_finished("已结束"));
+    }
+
+    #[test]
+    fn past_kickoff_matches_are_not_open_for_recommendation() {
+        let rows = vec![MatchRow {
+            id: "m2".to_string(),
+            match_num: "002".to_string(),
+            league: "世界杯".to_string(),
+            time: "2020-06-30T12:00:00Z".to_string(),
+            home: "主队".to_string(),
+            away: "客队".to_string(),
+            status: "TIMED".to_string(),
+        }];
+        assert!(!match_is_open_for_recommendation(
+            "m2",
+            "2020-06-30T12:00:00Z",
+            &rows
+        ));
+        assert!(match_is_open_for_recommendation(
+            "m3",
+            "2099-06-30T12:00:00Z",
+            &[]
         ));
     }
 
