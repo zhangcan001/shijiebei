@@ -8233,6 +8233,13 @@ struct TodayMonteCarloSimulationRequest {
     overwrite: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DebugSimulationCacheRequest {
+    match_id: Option<String>,
+    snapshot_id: Option<i64>,
+}
+
 fn compact_json_text(value: &Value) -> String {
     if value.is_null() {
         "-".to_string()
@@ -9249,7 +9256,7 @@ fn simulation_markdown_from_analysis(analysis: Option<&MatchAnalysis>) -> (Strin
 * 模拟版本：light_fallback_v1
 * 随机种子：-
 * 是否 fallback：是
-* fallback 说明：未读取到 match_simulation_results 中的 Monte Carlo 缓存，本段由 λ 比分矩阵快速估算。
+* fallback 说明：Monte Carlo 结果不可用；可能原因：lambda 缺失、数据库写入失败或模拟函数异常。请使用 debug_simulation_cache 检查。
 * 样本误差提示：50000次模拟仍存在随机误差，结果仅作概率参考；当前 fallback 未进行随机采样。
 * 主队平均进球：{lh:.2}
 * 客队平均进球：{la:.2}
@@ -10001,7 +10008,18 @@ fn run_monte_carlo_from_export_context(
         ],
     )
     .map_err(|error| error.to_string())?;
+    let simulation_result_id = conn
+        .query_row(
+            "select id from match_simulation_results
+             where match_id=?1 and snapshot_id=?2 and simulation_version='monte_carlo_v1' and iterations=?3
+             order by id desc limit 1",
+            params![match_id, snapshot_id, iterations as i64],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
     Ok(json!({
+        "saved": true,
+        "simulation_result_id": simulation_result_id,
         "match_id": match_id,
         "snapshot_id": snapshot_id,
         "iterations": iterations,
@@ -10075,6 +10093,79 @@ fn load_match_simulation_result(
             return Some(value);
         }
     }
+    if let Some(value) = conn
+        .query_row(
+            "select seed, home_lambda, away_lambda, adjusted_home_lambda, adjusted_away_lambda,
+                    summary_json, score_distribution_json, total_goals_distribution_json,
+                    margin_distribution_json, warnings_json, created_at, updated_at, snapshot_id
+             from match_simulation_results
+             where match_id=?1 and simulation_version='monte_carlo_v1' and iterations=?2
+             order by updated_at desc, id desc limit 1",
+            params![match_id, iterations as i64],
+            |row| {
+                let seed_text: String = row.get(0)?;
+                let summary_text: String = row.get(5)?;
+                let score_text: String = row.get(6)?;
+                let total_text: String = row.get(7)?;
+                let margin_text: String = row.get(8)?;
+                let warnings_text: String = row.get(9)?;
+                Ok(json!({
+                    "match_id": match_id,
+                    "snapshot_id": row.get::<_, i64>(12).unwrap_or(0),
+                    "iterations": iterations,
+                    "seed": seed_text.parse::<u64>().unwrap_or(0),
+                    "home_lambda": row.get::<_, f64>(1)?,
+                    "away_lambda": row.get::<_, f64>(2)?,
+                    "adjusted_home_lambda": row.get::<_, f64>(3)?,
+                    "adjusted_away_lambda": row.get::<_, f64>(4)?,
+                    "simulation_version": "monte_carlo_v1",
+                    "summary": serde_json::from_str::<Value>(&summary_text).unwrap_or_else(|_| json!({})),
+                    "score_distribution": serde_json::from_str::<Value>(&score_text).unwrap_or_else(|_| json!([])),
+                    "total_goals_distribution": serde_json::from_str::<Value>(&total_text).unwrap_or_else(|_| json!([])),
+                    "margin_distribution": serde_json::from_str::<Value>(&margin_text).unwrap_or_else(|_| json!([])),
+                    "warnings": serde_json::from_str::<Value>(&warnings_text).unwrap_or_else(|_| json!([])),
+                    "created_at": row.get::<_, String>(10)?,
+                    "updated_at": row.get::<_, String>(11)?,
+                    "cache_match": "latest_same_match"
+                }))
+            },
+        )
+        .ok()
+    {
+        return Some(value);
+    }
+    None
+}
+
+fn get_best_simulation_result(
+    conn: &Connection,
+    match_id: &str,
+    snapshot_id: Option<i64>,
+    merged_source_ids: &[String],
+    iterations: u32,
+) -> Option<Value> {
+    if let Some(mut value) = load_match_simulation_result(conn, match_id, snapshot_id, iterations) {
+        if value.get("cache_match").is_none() {
+            if let Some(map) = value.as_object_mut() {
+                map.insert("cache_match".to_string(), json!("exact_or_snapshot0"));
+            }
+        }
+        return Some(value);
+    }
+    for source_id in merged_source_ids {
+        if source_id == match_id {
+            continue;
+        }
+        if let Some(mut value) =
+            load_match_simulation_result(conn, source_id, snapshot_id, iterations)
+        {
+            if let Some(map) = value.as_object_mut() {
+                map.insert("cache_match".to_string(), json!("merged_source"));
+                map.insert("source_match_id".to_string(), json!(source_id));
+            }
+            return Some(value);
+        }
+    }
     None
 }
 
@@ -10129,7 +10220,9 @@ async fn get_match_simulation_result(
     snapshot_id: Option<i64>,
 ) -> Result<Value, String> {
     let conn = open_conn(&app)?;
-    load_match_simulation_result(&conn, &match_id, snapshot_id, 50_000)
+    let matches = list_matches(app.clone()).await.unwrap_or_default();
+    let merged_sources = export_merge_source_ids(&match_id, &matches);
+    get_best_simulation_result(&conn, &match_id, snapshot_id, &merged_sources, 50_000)
         .ok_or_else(|| "暂无 50000 次 Monte Carlo 模拟缓存。".to_string())
 }
 
@@ -10157,12 +10250,16 @@ async fn run_today_monte_carlo_simulations(
     let overwrite = request.overwrite.unwrap_or(true);
     let started = Instant::now();
     let mut results = Vec::new();
+    let mut cache_hit_count = 0usize;
+    let mut simulated_count = 0usize;
+    let mut failed_count = 0usize;
     for item in deduped {
         let snapshot = pick_snapshot_for_match(&snapshots, &item.id);
         if !overwrite
             && load_match_simulation_result(&conn, &item.id, snapshot.map(|row| row.id), iterations)
                 .is_some()
         {
+            cache_hit_count += 1;
             results.push(json!({
                 "match_id": item.id,
                 "status": "skipped",
@@ -10188,31 +10285,175 @@ async fn run_today_monte_carlo_simulations(
             true,
             true,
         ) {
-            Ok(value) => results.push(json!({
-                "match_id": item.id,
-                "status": "success",
-                "iterations": iterations,
-                "seed": value.get("seed").cloned().unwrap_or(Value::Null)
-            })),
-            Err(error) => results.push(json!({
-                "match_id": item.id,
-                "status": "failed",
-                "error": error
-            })),
+            Ok(value) => {
+                simulated_count += 1;
+                results.push(json!({
+                    "match_id": item.id,
+                    "snapshot_id": snapshot.map(|row| row.id).unwrap_or(0),
+                    "status": "success",
+                    "iterations": iterations,
+                    "seed": value.get("seed").cloned().unwrap_or(Value::Null),
+                    "saved": value.get("saved").and_then(Value::as_bool).unwrap_or(false),
+                    "simulation_result_id": value.get("simulation_result_id").cloned().unwrap_or(Value::Null)
+                }));
+            }
+            Err(error) => {
+                failed_count += 1;
+                results.push(json!({
+                    "match_id": item.id,
+                    "snapshot_id": snapshot.map(|row| row.id).unwrap_or(0),
+                    "status": "failed",
+                    "error": error
+                }));
+            }
         }
     }
     let elapsed_ms = started.elapsed().as_millis() as u64;
-    let failed_count = results
-        .iter()
-        .filter(|item| item.get("status").and_then(Value::as_str) == Some("failed"))
-        .count();
+    let fallback_count = failed_count;
     Ok(json!({
         "success": failed_count == 0,
         "simulation_version": "monte_carlo_v1",
         "iterations": iterations,
+        "total_matches": results.len(),
+        "simulated_count": simulated_count,
+        "cache_hit_count": cache_hit_count,
+        "failed_count": failed_count,
+        "fallback_count": fallback_count,
         "elapsed_ms": elapsed_ms,
         "warning": if elapsed_ms > 20_000 { "今日 Monte Carlo 模拟超过20秒，请检查性能。" } else { "" },
         "results": results
+    }))
+}
+
+#[tauri::command]
+async fn debug_simulation_cache(
+    app: AppHandle,
+    request: Option<DebugSimulationCacheRequest>,
+) -> Result<Value, String> {
+    let conn = open_conn(&app)?;
+    let request = request.unwrap_or(DebugSimulationCacheRequest {
+        match_id: None,
+        snapshot_id: None,
+    });
+    let table_exists: bool = conn
+        .query_row(
+            "select count(*) from sqlite_master where type='table' and name='match_simulation_results'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+    let total_rows: i64 = conn
+        .query_row("select count(*) from match_simulation_results", [], |row| {
+            row.get(0)
+        })
+        .unwrap_or(0);
+    let monte_carlo_rows: i64 = conn
+        .query_row(
+            "select count(*) from match_simulation_results where simulation_version='monte_carlo_v1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    let light_fallback_rows: i64 = conn
+        .query_row(
+            "select count(*) from match_simulation_results where simulation_version like '%fallback%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    let latest_10_rows = conn
+        .prepare(
+            "select id, match_id, snapshot_id, simulation_version, iterations, seed, updated_at
+             from match_simulation_results order by id desc limit 10",
+        )
+        .and_then(|mut stmt| {
+            let rows = stmt.query_map([], |row| {
+                Ok(json!({
+                    "id": row.get::<_, i64>(0)?,
+                    "match_id": row.get::<_, String>(1)?,
+                    "snapshot_id": row.get::<_, i64>(2).unwrap_or(0),
+                    "simulation_version": row.get::<_, String>(3)?,
+                    "iterations": row.get::<_, i64>(4)?,
+                    "seed": row.get::<_, String>(5)?,
+                    "updated_at": row.get::<_, String>(6)?
+                }))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()
+        })
+        .unwrap_or_default();
+    let query_match_id = request.match_id.unwrap_or_default();
+    let query_snapshot_id = request.snapshot_id;
+    let exact_match_found = if query_match_id.is_empty() {
+        false
+    } else {
+        conn.query_row(
+            "select count(*) from match_simulation_results
+             where match_id=?1 and snapshot_id=?2 and simulation_version='monte_carlo_v1' and iterations=50000",
+            params![query_match_id, query_snapshot_id.unwrap_or(0)],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+            > 0
+    };
+    let latest_match_found = if query_match_id.is_empty() {
+        false
+    } else {
+        conn.query_row(
+            "select count(*) from match_simulation_results
+             where match_id=?1 and simulation_version='monte_carlo_v1' and iterations=50000",
+            params![query_match_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+            > 0
+    };
+    let matches = list_matches(app.clone()).await.unwrap_or_default();
+    let merged_sources = if query_match_id.is_empty() {
+        Vec::<String>::new()
+    } else {
+        export_merge_source_ids(&query_match_id, &matches)
+    };
+    let merged_source_match_found = merged_sources.iter().any(|source_id| {
+        source_id != &query_match_id
+            && conn
+                .query_row(
+                    "select count(*) from match_simulation_results
+                     where match_id=?1 and simulation_version='monte_carlo_v1' and iterations=50000",
+                    params![source_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or(0)
+                > 0
+    });
+    let mut warnings = Vec::new();
+    if total_rows == 0 {
+        warnings.push("match_simulation_results 为空：请先运行一键 GPT 分析包或今日 Monte Carlo。");
+    }
+    if !query_match_id.is_empty() && !exact_match_found && latest_match_found {
+        warnings.push("精确 snapshot 未命中，但同 match_id 最新 Monte Carlo 可用。");
+    }
+    if !query_match_id.is_empty() && !latest_match_found && merged_source_match_found {
+        warnings.push("best match_id 未命中，但 merged source id 有 Monte Carlo 缓存。");
+    }
+    Ok(json!({
+        "table_exists": table_exists,
+        "total_simulation_rows": total_rows,
+        "monte_carlo_rows": monte_carlo_rows,
+        "light_fallback_rows": light_fallback_rows,
+        "latest_10_rows": latest_10_rows,
+        "query_match_id": query_match_id,
+        "query_snapshot_id": query_snapshot_id,
+        "exact_match_found": exact_match_found,
+        "latest_match_found": latest_match_found,
+        "merged_source_ids": merged_sources,
+        "merged_source_match_found": merged_source_match_found,
+        "warnings": warnings,
+        "suggested_actions": [
+            "如果 exact_match_found=false 但 latest_match_found=true，导出会自动使用同 match_id 最新缓存。",
+            "如果全部为 false，重新运行一键 GPT 分析包会主动补跑 50000 次 Monte Carlo。",
+            "如果仍 fallback，请检查 run_simulations 步骤错误。"
+        ]
     }))
 }
 
@@ -10776,8 +11017,30 @@ async fn build_gpt_analysis_package(
         .collect::<Vec<_>>();
     let odds_completeness_report =
         classify_odds_completeness(&recs, analysis, snapshot_has_odds(snapshot));
-    let cached_simulation =
+    let mut cached_simulation =
         load_match_simulation_result(&conn, &match_id, snapshot.map(|item| item.id), 50_000);
+    let mut simulation_error = String::new();
+    if include_simulation && cached_simulation.is_none() {
+        match run_monte_carlo_from_export_context(
+            &conn, match_row, analysis, snapshot, &recs, 50_000, None, true, true, true,
+        ) {
+            Ok(_) => {
+                cached_simulation = get_best_simulation_result(
+                    &conn,
+                    &match_id,
+                    snapshot.map(|item| item.id),
+                    &merged_sources,
+                    50_000,
+                );
+                if cached_simulation.is_none() {
+                    simulation_error = "Monte Carlo 已执行但缓存复查失败，请使用 debug_simulation_cache 检查 match_id/snapshot_id。".to_string();
+                }
+            }
+            Err(error) => {
+                simulation_error = format!("Monte Carlo 主动补跑失败：{}", error);
+            }
+        }
+    }
     let markdown = build_gpt_analysis_package_markdown(
         match_row,
         analysis,
@@ -10800,6 +11063,14 @@ async fn build_gpt_analysis_package(
         &match_id,
         &merge_reasons_text,
     );
+    let markdown = if !simulation_error.is_empty() {
+        markdown.replace(
+            "fallback 说明：Monte Carlo 结果不可用；可能原因：lambda 缺失、数据库写入失败或模拟函数异常。请使用 debug_simulation_cache 检查。",
+            &format!("fallback 说明：{}", simulation_error),
+        )
+    } else {
+        markdown
+    };
     Ok(json!({
         "match_id": match_id,
         "requested_match_id": requested_match_id,
@@ -15909,6 +16180,7 @@ pub fn run_app() {
             run_match_monte_carlo_simulation,
             run_today_monte_carlo_simulations,
             get_match_simulation_result,
+            debug_simulation_cache,
             save_prediction,
             list_predictions,
             list_review_odds_impact,
@@ -16481,6 +16753,15 @@ mod tests {
         assert!(source.contains("debug_refresh_state"));
         assert!(source.contains("\"backend_active_tasks\""));
         assert!(source.contains("\"not_tracked\""));
+    }
+
+    #[test]
+    fn debug_simulation_cache_command_is_registered() {
+        let source = include_str!("legacy_commands.rs");
+        assert!(source.contains("async fn debug_simulation_cache"));
+        assert!(source.contains("debug_simulation_cache"));
+        assert!(source.contains("exact_match_found"));
+        assert!(source.contains("merged_source_match_found"));
     }
 
     #[test]
@@ -18714,6 +18995,68 @@ mod tests {
         assert!(markdown.contains("是否 fallback：否"));
         assert!(markdown.contains("样本误差提示：50000次模拟仍存在随机误差"));
         assert!(!markdown.contains("轻量矩阵 9x9"));
+    }
+
+    #[test]
+    fn simulation_cache_lookup_falls_back_to_latest_same_match() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_test_simulation_tables(&conn);
+        let match_row = test_match_row("2040352", "英格兰", "刚果金");
+        let analysis = test_analysis("2040352");
+        let snapshot = test_snapshot("2040352", json!([]));
+        let rec = test_recommendation("2040352");
+        run_monte_carlo_from_export_context(
+            &conn,
+            Some(&match_row),
+            Some(&analysis),
+            Some(&snapshot),
+            &[rec],
+            50_000,
+            Some(123),
+            true,
+            true,
+            true,
+        )
+        .unwrap();
+        let loaded = load_match_simulation_result(&conn, "2040352", Some(999), 50_000).unwrap();
+        assert_eq!(loaded.get("seed").and_then(Value::as_u64), Some(123));
+        assert_eq!(
+            loaded.get("cache_match").and_then(Value::as_str),
+            Some("latest_same_match")
+        );
+    }
+
+    #[test]
+    fn gpt_fallback_text_names_actionable_error_sources() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "create table odds_snapshots(id integer, match_id text, created_at text);
+             create table odds_movements(id integer, match_id text, market text, pick text, direction text, delta_pct real);",
+        )
+        .unwrap();
+        let match_row = test_match_row("2040352", "英格兰", "刚果金");
+        let analysis = test_analysis("2040352");
+        let markdown = build_gpt_analysis_package_markdown(
+            Some(&match_row),
+            Some(&analysis),
+            None,
+            &[],
+            &[],
+            &conn,
+            true,
+            true,
+            true,
+            "",
+            "无需去重",
+            "仅一个快照",
+            1,
+            "2040352",
+            "2040352",
+            "综合评分最高",
+        );
+        assert!(markdown.contains("light_fallback_v1"));
+        assert!(markdown.contains("lambda 缺失、数据库写入失败或模拟函数异常"));
+        assert!(!markdown.contains("未读取到 match_simulation_results"));
     }
 
     #[test]
