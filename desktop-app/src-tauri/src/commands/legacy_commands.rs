@@ -1,6 +1,7 @@
 use crate::db::{
     app_dir, cache_get, cache_put, db_path, ensure_pre_match_snapshot_schema,
     expected_pre_match_snapshot_columns, open_conn, pre_match_snapshot_columns,
+    PRE_MATCH_SNAPSHOT_SELECT, PRE_MATCH_SNAPSHOT_SELECT_COUNT,
 };
 use crate::http_client::{
     http_football_data_org_json, http_json, http_sporttery_browser_json,
@@ -6816,16 +6817,6 @@ fn kickoff_is_future(kickoff_time: &str, snapshot_time: &str) -> bool {
     }
 }
 
-const PRE_MATCH_SNAPSHOT_SELECT: &str = "s.id, s.match_id, s.external_fixture_id, s.provider_match_id, s.snapshot_time, s.kickoff_time,
-                s.home_team, s.away_team, s.competition, s.season, s.stage, s.model_version,
-                s.model_probs_json, s.calibrated_probs_json, s.worldcup_correction_action,
-                s.odds_json, s.market_probs_json, s.ev_json, s.data_quality_score,
-                s.lineup_status, s.lineup_confidence, s.injury_status, s.injury_confidence,
-                s.risk_tags_json, s.final_decision, s.decision_reason_json, s.paper_strategy_id,
-                s.paper_trade_enabled, s.raw_features_json, s.created_before_kickoff, s.is_final_pre_match, s.created_at, s.updated_at";
-
-const PRE_MATCH_SNAPSHOT_SELECT_COUNT: usize = 33;
-
 fn map_pre_match_snapshot(row: &rusqlite::Row<'_>) -> rusqlite::Result<PreMatchSnapshotRow> {
     let is_final_pre_match = row.get::<_, i64>(30)? != 0;
     Ok(PreMatchSnapshotRow {
@@ -6867,23 +6858,9 @@ fn map_pre_match_snapshot(row: &rusqlite::Row<'_>) -> rusqlite::Result<PreMatchS
     })
 }
 
-fn map_pre_match_snapshot_with_settlement(
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<PreMatchSnapshotRow> {
-    let mut snapshot = map_pre_match_snapshot(row)?;
-    let settlement_text: Option<String> = row.get(PRE_MATCH_SNAPSHOT_SELECT_COUNT)?;
-    snapshot.settlement = settlement_text.map(parse_json_text);
-    Ok(snapshot)
-}
-
 fn pre_match_snapshot_select_sql(where_clause: &str) -> String {
     format!(
-        "select {PRE_MATCH_SNAPSHOT_SELECT},
-                (select json_object('home_score', r.home_score, 'away_score', r.away_score, 'result_spf', r.result_spf,
-                                    'total_goals', r.total_goals, 'settled_at', r.settled_at,
-                                    'is_hit_json', r.is_hit_json, 'paper_profit_json', r.paper_profit_json,
-                                    'settlement_status', r.settlement_status)
-                 from pre_match_snapshot_results r where r.snapshot_id=s.id order by r.id desc limit 1) as settlement
+        "select {PRE_MATCH_SNAPSHOT_SELECT}
          from pre_match_snapshots s {} order by s.kickoff_time asc, s.id desc",
         where_clause
     )
@@ -7130,9 +7107,7 @@ async fn create_pre_match_snapshot(app: AppHandle, match_id: String) -> Result<V
     let sql = pre_match_snapshot_select_sql("where s.id=?1");
     let snapshot = conn
         .prepare(&sql)
-        .and_then(|mut stmt| {
-            stmt.query_row(params![snapshot_id], map_pre_match_snapshot_with_settlement)
-        })
+        .and_then(|mut stmt| stmt.query_row(params![snapshot_id], map_pre_match_snapshot))
         .map_err(snapshot_mapping_error)?;
     Ok(json!({
         "ok": true,
@@ -7190,7 +7165,7 @@ async fn load_pre_match_snapshots(app: AppHandle) -> Result<Vec<PreMatchSnapshot
     let sql = pre_match_snapshot_select_sql("");
     let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
     let rows = stmt
-        .query_map([], map_pre_match_snapshot_with_settlement)
+        .query_map([], map_pre_match_snapshot)
         .map_err(|error| error.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(snapshot_mapping_error)
@@ -7230,7 +7205,7 @@ async fn get_match_snapshot_history(
     let sql = pre_match_snapshot_select_sql("where s.match_id=?1");
     let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
     let rows = stmt
-        .query_map(params![match_id], map_pre_match_snapshot_with_settlement)
+        .query_map(params![match_id], map_pre_match_snapshot)
         .map_err(|error| error.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(snapshot_mapping_error)
@@ -7277,7 +7252,7 @@ async fn debug_snapshot_schema(app: AppHandle) -> Result<Value, String> {
         let sql = pre_match_snapshot_select_sql("");
         let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
         let rows = stmt
-            .query_map([], map_pre_match_snapshot_with_settlement)
+            .query_map([], map_pre_match_snapshot)
             .map_err(|error| error.to_string())?;
         rows.take(3)
             .collect::<Result<Vec<_>, _>>()
@@ -7569,7 +7544,7 @@ async fn audit_pre_match_snapshots(app: AppHandle) -> Result<Value, String> {
         let sql = pre_match_snapshot_select_sql("");
         let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
         let rows = stmt
-            .query_map([], map_pre_match_snapshot_with_settlement)
+            .query_map([], map_pre_match_snapshot)
             .map_err(|error| error.to_string())?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())?
@@ -11982,10 +11957,15 @@ mod tests {
         assert!(!source.contains("### 数据源管理"));
         assert!(source.contains("section class=\"panel"));
         assert!(source.contains("source-grid"));
+        assert!(source.contains("source-meta"));
         assert!(source.contains("scroll-table"));
         assert!(source.contains("data-action=\"global-refresh\""));
+        assert!(source.contains("data-action=\"save-source-config\""));
+        assert!(source.contains("data-action=\"save-source-key\""));
+        assert!(source.contains("data-action=\"clear-source-key\""));
         assert!(source.contains("data-action=\"create-today-pre-match-snapshots\""));
         assert!(source.contains("data-action=\"test-source\""));
+        assert!(!source.contains("data-action=\"save-provider-key\""));
         assert!(source.contains("data-provider-id"));
         assert!(source.contains("尚未配置外部数据源"));
         assert!(source.contains("API-Football 未配置"));

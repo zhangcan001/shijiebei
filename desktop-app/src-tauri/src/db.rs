@@ -43,6 +43,16 @@ const PRE_MATCH_SNAPSHOT_COLUMNS: &[(&str, &str)] = &[
     ("updated_at", "text not null default ''"),
 ];
 
+pub(crate) const PRE_MATCH_SNAPSHOT_SELECT: &str = "s.id, s.match_id, s.external_fixture_id, s.provider_match_id, s.snapshot_time, s.kickoff_time,
+                s.home_team, s.away_team, s.competition, s.season, s.stage, s.model_version,
+                s.model_probs_json, s.calibrated_probs_json, s.worldcup_correction_action,
+                s.odds_json, s.market_probs_json, s.ev_json, s.data_quality_score,
+                s.lineup_status, s.lineup_confidence, s.injury_status, s.injury_confidence,
+                s.risk_tags_json, s.final_decision, s.decision_reason_json, s.paper_strategy_id,
+                s.paper_trade_enabled, s.raw_features_json, s.created_before_kickoff, s.is_final_pre_match, s.created_at, s.updated_at";
+
+pub(crate) const PRE_MATCH_SNAPSHOT_SELECT_COUNT: usize = 33;
+
 pub(crate) fn expected_pre_match_snapshot_columns() -> Vec<&'static str> {
     let mut columns = vec!["id"];
     columns.extend(PRE_MATCH_SNAPSHOT_COLUMNS.iter().map(|(name, _)| *name));

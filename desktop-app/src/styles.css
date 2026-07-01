@@ -421,8 +421,6 @@ th {
 }
 
 .source-card {
-  border: 1px solid var(--line);
-  border-radius: 8px;
   background: #f8fafc;
   padding: 12px;
   display: grid;
@@ -445,6 +443,19 @@ th {
 
 .source-kv strong {
   text-align: right;
+  min-width: 0;
+}
+
+.source-meta {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.source-meta > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
   min-width: 0;
 }
 

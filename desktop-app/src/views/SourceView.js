@@ -23,29 +23,31 @@ function providerCard(provider) {
   const health = provider.health_label || (provider.enabled ? "正常" : "禁用");
   const healthKind = health.includes("正常") ? "good" : health.includes("错误") || health.includes("缺失") ? "bad" : "warn";
   return `
-    <section class="source-card">
-      <div class="card-head source-card-head">
+    <div class="panel source-card">
+      <div class="card-head">
         <div>
-          <h3>${providerKind(provider)}</h3>
-          <p class="muted">${safe(provider.provider_id)}</p>
+          <h4>${providerKind(provider)}</h4>
+          <p class="muted wrap-text">${safe(provider.provider_id)}</p>
         </div>
         ${badge(provider.enabled ? "启用" : "禁用", provider.enabled ? "good" : "warn")}
       </div>
-      <div class="source-kv"><span>Key</span><strong>${keyState}</strong></div>
-      <div class="source-kv"><span>Base URL</span><strong class="wrap-text">${safe(provider.base_url || provider.url || provider.endpoint || "内置/缓存")}</strong></div>
-      <div class="source-kv"><span>今日请求</span><strong>${provider.today_requests || 0} / ${provider.daily_limit || "不限"}</strong></div>
-      <div class="source-kv"><span>剩余额度</span><strong>${provider.daily_limit ? Math.max(0, Number(provider.daily_limit || 0) - Number(provider.today_requests || 0)) : "不限"}</strong></div>
-      <div class="source-kv"><span>最近成功</span><strong>${safe(provider.last_success_at)}</strong></div>
-      <div class="source-kv"><span>最近错误</span><strong class="wrap-text">${safe(provider.last_error_message)}</strong></div>
-      <div class="source-kv"><span>健康</span><strong>${badge(health, healthKind)}</strong></div>
+      <div class="source-meta">
+        <div><span class="muted">Key</span><strong>${keyState}</strong></div>
+        <div><span class="muted">Base URL</span><span class="wrap-text">${safe(provider.base_url || provider.url || provider.endpoint || "内置/缓存")}</span></div>
+        <div><span class="muted">今日请求</span><span>${provider.today_requests || 0} / ${provider.daily_limit || "不限"}</span></div>
+        <div><span class="muted">剩余额度</span><span>${provider.daily_limit ? Math.max(0, Number(provider.daily_limit || 0) - Number(provider.today_requests || 0)) : "不限"}</span></div>
+        <div><span class="muted">最近成功</span><span>${safe(provider.last_success_at)}</span></div>
+        <div><span class="muted">最近错误</span><span class="wrap-text">${safe(provider.last_error_message)}</span></div>
+        <div><span class="muted">健康</span><span>${badge(health, healthKind)}</span></div>
+      </div>
       ${needsKey ? `<input id="provider-key-${provider.provider_id}" type="password" autocomplete="off" placeholder="${provider.key_configured ? "已配置，输入新 Key 可覆盖" : "输入 API Key"}">` : ""}
-      <div class="source-actions">
-        ${needsKey ? `<button class="mini" data-action="save-provider-key" data-provider-id="${provider.provider_id}">保存Key</button><button class="mini danger" data-action="clear-provider-key" data-provider-id="${provider.provider_id}">清Key</button>` : ""}
+      <div class="actions source-actions">
+        ${needsKey ? `<button class="mini" data-action="save-source-key" data-provider-id="${provider.provider_id}">保存Key</button><button class="mini danger" data-action="clear-source-key" data-provider-id="${provider.provider_id}">清Key</button>` : ""}
         <button class="mini" data-action="test-source" data-provider-id="${provider.provider_id}">测试</button>
         <button class="mini" data-action="toggle-source" data-provider-id="${provider.provider_id}" data-enabled="${provider.enabled ? "false" : "true"}">${provider.enabled ? "禁用" : "启用"}</button>
         <button class="mini danger" data-action="clear-source-cache" data-provider-id="${provider.provider_id}">清缓存</button>
       </div>
-    </section>
+    </div>
   `;
 }
 
@@ -110,21 +112,23 @@ export function renderSourceView(state) {
     <div class="source-page">
       ${dataRefreshProgressHtml(state.dataRefreshProgress)}
 
-      <section class="panel source-hero">
-        <div>
-          <h3>数据源管理</h3>
-          <p class="muted">当前数据状态：${state.status ? "已加载" : "等待加载"} · 最近刷新：${refresh.lastHealthAt || refresh.lastGlobalAt || "-"}</p>
-        </div>
-        <div class="source-actions">
-          <button class="btn" data-action="global-refresh">全局刷新</button>
-          <button class="btn secondary" data-action="save-external">保存配置</button>
-          <button class="btn secondary" data-action="create-today-pre-match-snapshots">生成今日快照</button>
-          <button class="btn ghost" data-action="open-backup-dir">打开备份目录</button>
+      <section class="panel span-12 source-hero">
+        <div class="card-head">
+          <div>
+            <h3>数据源管理</h3>
+            <p class="muted">当前数据状态：${state.status ? "已加载" : "等待加载"} · 最近刷新：${refresh.lastHealthAt || refresh.lastGlobalAt || "-"}</p>
+          </div>
+          <div class="actions source-actions">
+            <button class="btn" data-action="global-refresh">全局刷新</button>
+            <button class="btn secondary" data-action="save-source-config">保存配置</button>
+            <button class="btn secondary" data-action="create-today-pre-match-snapshots">生成今日快照</button>
+            <button class="btn ghost" data-action="open-backup-dir">打开备份目录</button>
+          </div>
         </div>
       </section>
 
-      <section class="panel">
-        <h3>API 配置</h3>
+      <section class="panel span-12">
+        <div class="card-head"><h3>API 配置</h3></div>
         ${providers.length ? `<div class="source-grid">${providers.map(providerCard).join("")}</div>` : `<p class="muted">尚未配置外部数据源，当前仅使用本地缓存/基础数据。</p>`}
         ${apiFootball && !apiFootball.key_configured ? `<p class="muted">API-Football 未配置，首发/伤停/赛程补强不可用。</p>` : ""}
       </section>
@@ -133,9 +137,9 @@ export function renderSourceView(state) {
         ${healthCards(state)}
       </section>
 
-      <section class="panel">
-        <h3>操作区</h3>
-        <div class="source-actions grouped">
+      <section class="panel span-12">
+        <div class="card-head"><h3>操作区</h3></div>
+        <div class="actions source-actions grouped">
           <button class="btn secondary" data-action="refresh-core">同步今日比赛</button>
           <button class="btn secondary" data-action="refresh-core">同步赔率</button>
           <button class="btn secondary" data-action="refresh-results">同步赛果</button>
@@ -147,8 +151,8 @@ export function renderSourceView(state) {
         ${oddsMissing ? `<p class="muted">赔率缺失，EV、赔率异动、冷门实验室和纸面交易将受影响。</p>` : ""}
       </section>
 
-      <section class="panel">
-        <h3>外部数据源配置</h3>
+      <section class="panel span-12">
+        <div class="card-head"><h3>外部数据源配置</h3></div>
         <div class="source-grid">
           <label>伤停 JSON / 代理URL<input id="injury-url" value="${safe(config.injury_url, "")}" placeholder="https://..."></label>
           <label>首发 JSON / 代理URL<input id="lineup-url" value="${safe(config.lineup_url, "")}" placeholder="https://..."></label>
@@ -157,8 +161,8 @@ export function renderSourceView(state) {
         <label>备注<input id="source-notes" value="${safe(config.notes, "")}"></label>
       </section>
 
-      <section class="panel table-panel">
-        <h3>日志 / 错误</h3>
+      <section class="panel span-12 table-panel">
+        <div class="card-head"><h3>日志 / 错误</h3></div>
         ${(warnings || []).length ? `<p class="muted">建议：${warnings.join("；")}</p>` : `<p class="muted">暂无阻断性建议。</p>`}
         <div class="scroll-table">
           <table><thead><tr><th>来源</th><th>时间</th><th>错误/状态</th><th>建议</th></tr></thead><tbody>${logRows(state)}</tbody></table>

@@ -2630,18 +2630,18 @@ document.addEventListener("click", event => {
   if (action === "settle-hit") safeRun("结算命中", async () => settlePrediction(event.target.dataset.id, true));
   if (action === "settle-miss") safeRun("结算未中", async () => settlePrediction(event.target.dataset.id, false));
   if (action === "save-bankroll") safeRun("保存资金设置", saveBankroll);
-  if (action === "save-external") safeRun("保存外部源", saveExternalConfig);
+  if (action === "save-external" || action === "save-source-config") safeRun("保存外部源", saveExternalConfig);
   if (action === "refresh-sporttery-injury") safeRun("刷新竞彩网伤停", refreshSportteryInjuries);
   if (action === "refresh-external" || action === "global-refresh") safeRun("刷新外部源", refreshExternalSources);
   if (action === "probe-injury") safeRun("测试伤停源", async () => probeExternal(document.querySelector("#injury-url")?.value || ""));
   if (action === "probe-lineup") safeRun("测试首发源", async () => probeExternal(document.querySelector("#lineup-url")?.value || ""));
   if (action === "probe-stats") safeRun("测试统计源", async () => probeExternal(document.querySelector("#stats-url")?.value || ""));
-  if (action === "save-provider-key") {
+  if (action === "save-provider-key" || action === "save-source-key") {
     const providerId = event.target.dataset.providerId || event.target.dataset.provider;
     const apiKey = document.querySelector(`#provider-key-${providerId}`)?.value || "";
     safeRun("保存 Provider Key", async () => saveProviderCredential(providerId, apiKey));
   }
-  if (action === "clear-provider-key") safeRun("清除 Provider Key", async () => clearProviderCredential(event.target.dataset.providerId || event.target.dataset.provider));
+  if (action === "clear-provider-key" || action === "clear-source-key") safeRun("清除 Provider Key", async () => clearProviderCredential(event.target.dataset.providerId || event.target.dataset.provider));
   if (action === "test-provider" || action === "test-source") safeRun("测试 Provider", async () => testProvider(event.target.dataset.providerId || event.target.dataset.provider));
   if (action === "toggle-provider" || action === "toggle-source") safeRun("切换 Provider", async () => toggleProvider(event.target.dataset.providerId || event.target.dataset.provider, event.target.dataset.enabled === "true"));
   if (action === "clear-provider-cache" || action === "clear-source-cache") safeRun("清除 Provider 缓存", async () => clearProviderCache(event.target.dataset.providerId || event.target.dataset.provider));
