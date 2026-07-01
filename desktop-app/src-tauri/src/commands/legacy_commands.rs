@@ -312,7 +312,13 @@ fn canonical_team_name(name: &str) -> String {
         ("突尼斯", &["tunisia"]),
         (
             "民主刚果",
-            &["dr congo", "congo dr", "democratic republic of congo"],
+            &[
+                "dr congo",
+                "congo dr",
+                "democratic republic of congo",
+                "刚果金",
+                "congo kinshasa",
+            ],
         ),
         ("乌兹别克斯坦", &["uzbekistan"]),
         ("卡塔尔", &["qatar"]),
@@ -8191,6 +8197,273 @@ fn compact_json_text(value: &Value) -> String {
     }
 }
 
+fn json_has_content(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(map) => !map.is_empty(),
+        Value::String(text) => !text.trim().is_empty() && text.trim() != "null",
+        _ => true,
+    }
+}
+
+fn compact_json_top(value: &Value, limit: usize) -> String {
+    match value {
+        Value::Array(items) => {
+            let mut out = items.iter().take(limit).cloned().collect::<Vec<_>>();
+            let truncated = items.len() > limit;
+            if truncated {
+                out.push(json!({"note": format!("仅展示前{}条，完整数据请看软件。", limit)}));
+            }
+            serde_json::to_string(&out).unwrap_or_else(|_| "-".to_string())
+        }
+        Value::Object(map) => {
+            let mut limited = serde_json::Map::new();
+            for (idx, (key, value)) in map.iter().enumerate() {
+                if idx >= limit {
+                    limited.insert(
+                        "_note".to_string(),
+                        json!(format!("仅展示前{}项，完整数据请看软件。", limit)),
+                    );
+                    break;
+                }
+                limited.insert(key.clone(), value.clone());
+            }
+            serde_json::to_string(&Value::Object(limited)).unwrap_or_else(|_| "-".to_string())
+        }
+        _ => compact_json_text(value),
+    }
+}
+
+fn normalize_match_team_key(team: &str) -> String {
+    normalize(&canonical_team_name(team))
+}
+
+fn normalize_stage_for_export(raw_stage: &str, kickoff: &str, competition: &str) -> (String, bool) {
+    let raw = raw_stage.trim();
+    let lower = raw.to_ascii_lowercase();
+    let invalid = raw.is_empty()
+        || matches!(
+            lower.as_str(),
+            "timed" | "scheduled" | "selling" | "sale" | "on_sale" | "on sale"
+        );
+    if !invalid {
+        return (raw.to_string(), true);
+    }
+    let context = format!("{} {}", competition, kickoff).to_ascii_lowercase();
+    if context.contains("world") || competition.contains("世界杯") || kickoff.starts_with("2026-")
+    {
+        ("淘汰赛（待确认轮次）".to_string(), false)
+    } else {
+        ("待确认".to_string(), false)
+    }
+}
+
+fn match_time_bucket_12h(time: &str) -> i64 {
+    parse_time_as_utc(time)
+        .map(|value| value.timestamp() / (12 * 3600))
+        .unwrap_or(0)
+}
+
+fn normalize_match_key_from_parts(home: &str, away: &str, kickoff: &str) -> String {
+    format!(
+        "{}__{}__{}",
+        normalize_match_team_key(home),
+        normalize_match_team_key(away),
+        match_time_bucket_12h(kickoff)
+    )
+}
+
+fn normalize_match_key(match_row: &MatchRow) -> String {
+    normalize_match_key_from_parts(&match_row.home, &match_row.away, &match_row.time)
+}
+
+fn snapshot_has_model_probs(snapshot: Option<&PreMatchSnapshotRow>) -> bool {
+    snapshot
+        .map(|item| {
+            json_has_content(&item.model_probs_json)
+                || json_has_content(&item.calibrated_probs_json)
+        })
+        .unwrap_or(false)
+}
+
+fn snapshot_has_odds(snapshot: Option<&PreMatchSnapshotRow>) -> bool {
+    snapshot
+        .map(|item| {
+            json_has_content(&item.odds_json)
+                || json_has_content(&item.market_probs_json)
+                || json_has_content(&item.ev_json)
+        })
+        .unwrap_or(false)
+}
+
+fn value_market_count(value: &Value) -> usize {
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|item| {
+                item.get("market")
+                    .or_else(|| item.get("play_type"))
+                    .or_else(|| item.get("pool"))
+                    .and_then(Value::as_str)
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        Value::Object(map) => map.keys().collect::<std::collections::BTreeSet<_>>().len(),
+        _ => 0,
+    }
+}
+
+fn snapshot_export_score(
+    match_id: &str,
+    snapshot: Option<&PreMatchSnapshotRow>,
+    analysis: Option<&MatchAnalysis>,
+    recommendations: &[Recommendation],
+) -> f64 {
+    let data_quality = snapshot
+        .map(|item| item.data_quality_score)
+        .unwrap_or_else(|| {
+            recommendations
+                .first()
+                .map(|item| item.data_score)
+                .unwrap_or(0.0)
+        });
+    let has_odds =
+        recommendations.iter().any(|item| item.odds > 1.0) || snapshot_has_odds(snapshot);
+    let has_model = analysis.is_some() || snapshot_has_model_probs(snapshot);
+    let has_simulation = analysis
+        .map(|item| item.lambda_home > 0.0 && item.lambda_away > 0.0)
+        .unwrap_or(false);
+    let is_final = snapshot
+        .map(|item| item.is_final_pre_match)
+        .unwrap_or(false);
+    let before_kickoff = snapshot
+        .map(|item| item.created_before_kickoff)
+        .unwrap_or(false);
+    let fallback = analysis.is_none() || match_id.starts_with("football-data-org-");
+    data_quality
+        + if has_odds { 30.0 } else { 0.0 }
+        + if has_model { 30.0 } else { 0.0 }
+        + if has_simulation { 20.0 } else { 0.0 }
+        + if is_final { 20.0 } else { 0.0 }
+        + if before_kickoff { 10.0 } else { 0.0 }
+        - if fallback { 30.0 } else { 0.0 }
+        - if has_odds { 0.0 } else { 20.0 }
+        - if has_model { 0.0 } else { 20.0 }
+}
+
+fn movement_summary_for_match(conn: &Connection, match_id: &str, limit: usize) -> String {
+    let mut stmt = match conn.prepare(
+        "select market, pick, direction, delta_pct
+         from odds_movements where match_id=?1
+         order by id desc limit ?2",
+    ) {
+        Ok(stmt) => stmt,
+        Err(_) => return "-".to_string(),
+    };
+    let rows = stmt
+        .query_map(params![match_id, limit as i64], |row| {
+            Ok(format!(
+                "{} {} {} {:.2}%",
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, f64>(3)? * 100.0
+            ))
+        })
+        .ok()
+        .map(|rows| rows.filter_map(Result::ok).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if rows.is_empty() {
+        "-".to_string()
+    } else {
+        rows.join("；")
+    }
+}
+
+fn movement_for_pick(conn: &Connection, match_id: &str, market_prefix: &str, pick: &str) -> String {
+    conn.query_row(
+        "select direction, delta_pct from odds_movements
+         where match_id=?1 and market like ?2 and pick=?3
+         order by id desc limit 1",
+        params![match_id, format!("{}%", market_prefix), pick],
+        |row| {
+            Ok(format!(
+                "{} {:.2}%",
+                row.get::<_, String>(0)?,
+                row.get::<_, f64>(1)? * 100.0
+            ))
+        },
+    )
+    .unwrap_or_else(|_| "-".to_string())
+}
+
+fn best_export_match_id_for<'a>(
+    target_match_id: &str,
+    matches: &'a [MatchRow],
+    snapshots: &'a [PreMatchSnapshotRow],
+    analyses: &'a [MatchAnalysis],
+    recommendations: &'a [Recommendation],
+) -> (String, usize, f64) {
+    let Some(target) = matches.iter().find(|item| item.id == target_match_id) else {
+        return (target_match_id.to_string(), 1, 0.0);
+    };
+    let target_key = normalize_match_key(target);
+    let mut candidates = matches
+        .iter()
+        .filter(|item| normalize_match_key(item) == target_key)
+        .map(|item| {
+            let snapshot = pick_snapshot_for_match(snapshots, &item.id);
+            let analysis = analyses
+                .iter()
+                .find(|analysis| analysis.match_id == item.id);
+            let recs = recommendations
+                .iter()
+                .filter(|rec| rec.match_id == item.id)
+                .cloned()
+                .collect::<Vec<_>>();
+            (
+                item.id.clone(),
+                snapshot_export_score(&item.id, snapshot, analysis, &recs),
+            )
+        })
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return (target_match_id.to_string(), 1, 0.0);
+    }
+    let count = candidates.len();
+    candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    (candidates[0].0.clone(), count, candidates[0].1)
+}
+
+fn dedupe_matches_for_gpt_export(
+    matches: Vec<MatchRow>,
+    snapshots: &[PreMatchSnapshotRow],
+    analyses: &[MatchAnalysis],
+    recommendations: &[Recommendation],
+) -> Vec<MatchRow> {
+    let mut grouped = BTreeMap::<String, MatchRow>::new();
+    let mut grouped_score = BTreeMap::<String, f64>::new();
+    for item in matches {
+        let key = normalize_match_key(&item);
+        let snapshot = pick_snapshot_for_match(snapshots, &item.id);
+        let analysis = analyses
+            .iter()
+            .find(|analysis| analysis.match_id == item.id);
+        let recs = recommendations
+            .iter()
+            .filter(|rec| rec.match_id == item.id)
+            .cloned()
+            .collect::<Vec<_>>();
+        let score = snapshot_export_score(&item.id, snapshot, analysis, &recs);
+        if score > *grouped_score.get(&key).unwrap_or(&f64::MIN) {
+            grouped_score.insert(key.clone(), score);
+            grouped.insert(key, item);
+        }
+    }
+    grouped.into_values().collect::<Vec<_>>()
+}
+
 fn sanitize_file_component(value: &str) -> String {
     let mut out = value
         .chars()
@@ -8352,11 +8625,12 @@ fn fmt_ev_cell(value: Option<f64>) -> String {
 }
 
 fn odds_row_for(
+    conn: &Connection,
+    match_id: &str,
     recommendations: &[Recommendation],
     analysis: Option<&MatchAnalysis>,
     market_prefix: &str,
     pick: &str,
-    change: &str,
 ) -> String {
     let rec = recommendation_lookup(recommendations, market_prefix, pick);
     let prob = analysis.and_then(|analysis| match market_prefix {
@@ -8385,25 +8659,27 @@ fn odds_row_for(
         fmt_pct_cell(market_prob),
         fmt_pct_cell(model_prob),
         fmt_ev_cell(ev),
-        change
+        movement_for_pick(conn, match_id, market_prefix, pick)
     )
 }
 
 fn hhad_row_for(
+    conn: &Connection,
+    match_id: &str,
     recommendations: &[Recommendation],
     analysis: Option<&MatchAnalysis>,
     line: &str,
     pick: &str,
-    change: &str,
 ) -> String {
-    let cells = odds_row_for(recommendations, analysis, "HHAD", pick, change);
+    let cells = odds_row_for(conn, match_id, recommendations, analysis, "HHAD", pick);
     cells.replacen("| ", &format!("| {} | ", line), 1)
 }
 
 fn odds_tables_markdown(
+    conn: &Connection,
+    match_id: &str,
     recommendations: &[Recommendation],
     analysis: Option<&MatchAnalysis>,
-    movement_note: &str,
 ) -> String {
     let hhad_line = analysis
         .map(|item| item.hhad_line.as_str())
@@ -8421,11 +8697,12 @@ fn odds_tables_markdown(
                 .take(8)
                 .map(|item| {
                     odds_row_for(
+                        conn,
+                        match_id,
                         recommendations,
                         analysis.into(),
                         "TTG",
                         item.pick.as_str(),
-                        movement_note,
                     )
                 })
                 .collect::<Vec<_>>()
@@ -8440,11 +8717,12 @@ fn odds_tables_markdown(
                 .take(10)
                 .map(|item| {
                     odds_row_for(
+                        conn,
+                        match_id,
                         recommendations,
                         analysis.into(),
                         "CRS",
                         &item.pick,
-                        movement_note,
                     )
                 })
                 .collect::<Vec<_>>()
@@ -8480,12 +8758,12 @@ fn odds_tables_markdown(
 | -- | -: | ---: | ---: | -: | -- |
 {score_rows}
 "#,
-        had_home = odds_row_for(recommendations, analysis, "HAD", "主胜", movement_note),
-        had_draw = odds_row_for(recommendations, analysis, "HAD", "平局", movement_note),
-        had_away = odds_row_for(recommendations, analysis, "HAD", "客胜", movement_note),
-        hhad_home = hhad_row_for(recommendations, analysis, hhad_line, "让胜", movement_note),
-        hhad_draw = hhad_row_for(recommendations, analysis, hhad_line, "让平", movement_note),
-        hhad_away = hhad_row_for(recommendations, analysis, hhad_line, "让负", movement_note),
+        had_home = odds_row_for(conn, match_id, recommendations, analysis, "HAD", "主胜"),
+        had_draw = odds_row_for(conn, match_id, recommendations, analysis, "HAD", "平局"),
+        had_away = odds_row_for(conn, match_id, recommendations, analysis, "HAD", "客胜"),
+        hhad_home = hhad_row_for(conn, match_id, recommendations, analysis, hhad_line, "让胜"),
+        hhad_draw = hhad_row_for(conn, match_id, recommendations, analysis, hhad_line, "让平"),
+        hhad_away = hhad_row_for(conn, match_id, recommendations, analysis, hhad_line, "让负"),
         ttg_rows = ttg_rows,
         score_rows = score_rows,
     )
@@ -8754,40 +9032,6 @@ fn odds_snapshot_count_for_match(conn: &Connection, match_id: &str) -> i64 {
     .unwrap_or(0)
 }
 
-fn movement_note_for_match(conn: &Connection, match_id: &str) -> String {
-    let count = odds_snapshot_count_for_match(conn, match_id);
-    if count < 2 {
-        return "快照不足，无法判断变化。".to_string();
-    }
-    let mut stmt = match conn.prepare(
-        "select market, pick, direction, delta_pct
-         from odds_movements
-         where match_id=?1
-         order by id desc limit 5",
-    ) {
-        Ok(stmt) => stmt,
-        Err(_) => return "暂无赔率异动记录。".to_string(),
-    };
-    let rows = stmt
-        .query_map(params![match_id], |row| {
-            Ok(format!(
-                "{} {} {} {:.2}%",
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, f64>(3)? * 100.0
-            ))
-        })
-        .ok()
-        .map(|rows| rows.filter_map(Result::ok).collect::<Vec<_>>())
-        .unwrap_or_default();
-    if rows.is_empty() {
-        "暂无赔率异动记录。".to_string()
-    } else {
-        rows.join("；")
-    }
-}
-
 fn gpt_questions_markdown() -> &'static str {
     r#"请你作为赛前分析师，基于以上信息和最新公开资料，分析：
 1. 哪个方向更合理：胜平负、让球、总进球、比分？
@@ -8812,6 +9056,7 @@ fn build_gpt_analysis_package_markdown(
     include_simulation: bool,
     include_upset_lab: bool,
     include_raw_odds: bool,
+    data_merge_note: &str,
 ) -> String {
     let match_id = match_row
         .map(|item| item.id.as_str())
@@ -8833,10 +9078,15 @@ fn build_gpt_analysis_package_markdown(
         .map(|item| item.time.as_str())
         .or_else(|| snapshot.map(|item| item.kickoff_time.as_str()))
         .unwrap_or("-");
-    let stage = match_row
+    let raw_stage = match_row
         .map(|item| item.status.as_str())
         .or_else(|| snapshot.map(|item| item.stage.as_str()))
         .unwrap_or("-");
+    let competition = snapshot
+        .map(|item| item.competition.as_str())
+        .or_else(|| match_row.map(|item| item.league.as_str()))
+        .unwrap_or("");
+    let (stage, stage_is_normal) = normalize_stage_for_export(raw_stage, kickoff, competition);
     let odds_count = odds_snapshot_count_for_match(conn, match_id);
     let odds_batch_count = odds_snapshot_batches(conn, match_id);
     let latest_odds_time = conn
@@ -8845,14 +9095,30 @@ fn build_gpt_analysis_package_markdown(
             params![match_id],
             |row| row.get::<_, String>(0),
         )
-        .unwrap_or_else(|_| "-".to_string());
-    let movement_note = movement_note_for_match(conn, match_id);
+        .unwrap_or_else(|_| {
+            snapshot
+                .map(|item| item.snapshot_time.clone())
+                .unwrap_or_else(|| "-".to_string())
+        });
+    let movement_summary = movement_summary_for_match(conn, match_id, 5);
     let has_odds = recommendations.iter().any(|item| item.odds > 1.0)
         || snapshot
-            .map(|item| !item.odds_json.is_null() && item.odds_json != json!([]))
+            .map(|item| {
+                json_has_content(&item.odds_json)
+                    || json_has_content(&item.market_probs_json)
+                    || json_has_content(&item.ev_json)
+            })
             .unwrap_or(false);
     let missing_odds_note = if has_odds {
-        "赔率可用"
+        if recommendations.is_empty()
+            && snapshot
+                .map(|item| json_has_content(&item.odds_json))
+                .unwrap_or(false)
+        {
+            "赔率原始数据存在，但结构化表格未完全解析，请人工复核。"
+        } else {
+            "赔率可用"
+        }
     } else {
         "赔率缺失，不能计算 EV"
     };
@@ -8905,7 +9171,7 @@ fn build_gpt_analysis_package_markdown(
     } else {
         ("本次导出未包含模拟比赛信息。".to_string(), false)
     };
-    let odds_tables = odds_tables_markdown(recommendations, analysis, &movement_note);
+    let odds_tables = odds_tables_markdown(conn, match_id, recommendations, analysis);
     let upset_markdown = if include_upset_lab {
         upset_table_markdown(upset_candidates)
     } else {
@@ -8913,7 +9179,7 @@ fn build_gpt_analysis_package_markdown(
     };
     let raw_odds_text = if include_raw_odds {
         snapshot
-            .map(|item| compact_json_text(&item.odds_json))
+            .map(|item| compact_json_top(&item.odds_json, 20))
             .unwrap_or_else(|| "-".to_string())
     } else {
         "未导出 raw_odds。".to_string()
@@ -8941,10 +9207,57 @@ fn build_gpt_analysis_package_markdown(
         .map(|item| format!("{} {}", item.market, item.pick))
         .collect::<Vec<_>>()
         .join("；");
+    let market_count = recommendations
+        .iter()
+        .map(|item| item.market.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        .max(
+            snapshot
+                .map(|item| value_market_count(&item.odds_json))
+                .unwrap_or(0),
+        )
+        .max(
+            snapshot
+                .map(|item| value_market_count(&item.market_probs_json))
+                .unwrap_or(0),
+        );
+    let model_complete = analysis.is_some() || snapshot_has_model_probs(snapshot);
+    let odds_completeness = if !has_odds {
+        "缺失"
+    } else if recommendations.is_empty() {
+        "部分"
+    } else {
+        "完整"
+    };
+    let snapshot_warning = if odds_batch_count == 0 && odds_count > 0 {
+        "赔率记录存在，但快照次数统计缺失，请检查数据源映射。"
+    } else if odds_batch_count < 2 {
+        "快照不足，无法判断变化。"
+    } else {
+        "快照数量可用于初步观察。"
+    };
+    let merge_note = if data_merge_note.trim().is_empty() {
+        "未触发合并。"
+    } else {
+        data_merge_note
+    };
     format!(
         r#"# GPT赛前分析包：{label}
 
 > 本分析包用于复制到 GPT 网页版或人工复核。软件不保证预测准确，自动推荐默认作为 observation_only 参考；比分、总进球、冷门玩法默认观察。
+
+## 导出质量检查
+
+* 是否去重：{deduped}
+* 是否选择最佳快照：{best_snapshot_selected}
+* 赔率完整性：{odds_completeness}
+* 模型完整性：{model_completeness}
+* 模拟信息：{simulation_status}
+* 阶段字段：{stage_status}
+* 主要缺失项：{missing_fields}
+
+> 数据源合并提示：{merge_note}
 
 ## 1. 基础信息
 * match_id：{match_id}
@@ -8973,9 +9286,9 @@ fn build_gpt_analysis_package_markdown(
 * 赔率记录条数：{odds_count}
 * 市场数量：{market_count}
 * 最近快照时间：{latest_odds_time}
-* 赔率变化方向：{movement_note}
+* 赔率变化总摘要：{movement_summary}
 * 快照不足提示：{snapshot_warning}
-* 快照赔率原始摘要：{raw_odds_text}
+* raw_odds_summary（Top 20）：{raw_odds_text}
 * 盘口/EV 摘要：{snapshot_ev}
 
 ## 3. 模型输出
@@ -9003,7 +9316,7 @@ fn build_gpt_analysis_package_markdown(
 * 伤停状态：{injury_status}
 * xG 是否缺失：{xg_missing}
 * 数据缺失项：{missing_fields}
-* 赔率异常：{movement_note}
+* 赔率异常：{movement_summary}
 * 快照不足：{snapshot_warning}
 * hard_ban 标签：{hard_ban_tags}
 * 冷门实验室标签：
@@ -9043,7 +9356,7 @@ fn build_gpt_analysis_package_markdown(
         away_rank = team_rank(away)
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".to_string()),
-        is_knockout = if is_knockout_stage(stage) {
+        is_knockout = if is_knockout_stage(&stage) {
             "是"
         } else {
             "需确认"
@@ -9070,17 +9383,9 @@ fn build_gpt_analysis_package_markdown(
         odds_count = odds_count,
         odds_batch_count = odds_batch_count,
         latest_odds_time = latest_odds_time,
-        movement_note = movement_note,
-        market_count = recommendations
-            .iter()
-            .map(|item| item.market.as_str())
-            .collect::<std::collections::BTreeSet<_>>()
-            .len(),
-        snapshot_warning = if odds_batch_count < 2 {
-            "快照不足，无法判断变化。"
-        } else {
-            "快照数量可用于初步观察。"
-        },
+        movement_summary = movement_summary,
+        market_count = market_count,
+        snapshot_warning = snapshot_warning,
         raw_odds_text = raw_odds_text,
         snapshot_ev = snapshot
             .map(|item| compact_json_text(&item.ev_json))
@@ -9139,6 +9444,25 @@ fn build_gpt_analysis_package_markdown(
         } else {
             missing_fields.join("、")
         },
+        deduped = if data_merge_note.trim().is_empty() {
+            "否"
+        } else {
+            "是"
+        },
+        best_snapshot_selected = if data_merge_note.trim().is_empty() {
+            "否"
+        } else {
+            "是"
+        },
+        odds_completeness = odds_completeness,
+        model_completeness = if model_complete { "完整" } else { "缺失" },
+        simulation_status = if analysis.is_some() { "有" } else { "无" },
+        stage_status = if stage_is_normal {
+            "正常"
+        } else {
+            "待确认"
+        },
+        merge_note = merge_note,
         hard_ban_tags = recommendations
             .iter()
             .filter(|item| item.final_decision == "hard_ban" || item.decision == "禁止")
@@ -9172,6 +9496,10 @@ async fn build_gpt_analysis_package(
     let snapshots = load_pre_match_snapshots(app.clone())
         .await
         .unwrap_or_default();
+    let (resolved_match_id, merge_count, export_score) =
+        best_export_match_id_for(&match_id, &matches, &snapshots, &analyses, &recommendations);
+    let requested_match_id = match_id;
+    let match_id = resolved_match_id;
     let upset_candidates = get_upset_lab_candidates(app.clone(), None, None, None)
         .await
         .unwrap_or_default();
@@ -9198,13 +9526,21 @@ async fn build_gpt_analysis_package(
         include_simulation,
         include_upset_lab,
         include_raw_odds,
+        if merge_count > 1 {
+            "本场匹配到多个来源，已优先选择有赔率/模型/模拟信息的快照。其他来源仅作为补充，不重复导出。"
+        } else {
+            ""
+        },
     );
     Ok(json!({
         "match_id": match_id,
+        "requested_match_id": requested_match_id,
+        "merged_source_count": merge_count,
+        "export_score": export_score,
         "markdown": markdown,
         "has_snapshot": snapshot.is_some(),
         "is_final_snapshot": snapshot.map(|item| item.is_final_pre_match).unwrap_or(false),
-        "has_odds": recs.iter().any(|item| item.odds > 1.0) || snapshot.map(|item| !item.odds_json.is_null() && item.odds_json != json!([])).unwrap_or(false),
+        "has_odds": recs.iter().any(|item| item.odds > 1.0) || snapshot_has_odds(snapshot),
         "odds_snapshot_count": odds_snapshot_count_for_match(&conn, &match_id),
         "warning": if snapshot.is_none() { "无赛前快照，已导出非冻结基础分析包。" } else { "" }
     }))
@@ -9246,10 +9582,17 @@ async fn copy_gpt_match_package(
 #[tauri::command]
 async fn gpt_today_analysis_packages(app: AppHandle) -> Result<Value, String> {
     let matches = list_matches(app.clone()).await.unwrap_or_default();
+    let snapshots = load_pre_match_snapshots(app.clone())
+        .await
+        .unwrap_or_default();
+    let analyses = list_match_analyses(app.clone()).await.unwrap_or_default();
+    let recommendations = list_recommendations(app.clone()).await.unwrap_or_default();
     let open_matches = matches
         .into_iter()
         .filter(|item| !match_time_is_past(&item.time))
         .collect::<Vec<_>>();
+    let open_matches =
+        dedupe_matches_for_gpt_export(open_matches, &snapshots, &analyses, &recommendations);
     let mut packages = Vec::new();
     let mut markdowns = Vec::new();
     for item in open_matches {
@@ -9373,6 +9716,11 @@ async fn export_gpt_today_packages(
     request: ExportGptTodayPackagesRequest,
 ) -> Result<Value, String> {
     let matches = list_matches(app.clone()).await.unwrap_or_default();
+    let snapshots = load_pre_match_snapshots(app.clone())
+        .await
+        .unwrap_or_default();
+    let analyses = list_match_analyses(app.clone()).await.unwrap_or_default();
+    let recommendations = list_recommendations(app.clone()).await.unwrap_or_default();
     let date = request
         .date
         .clone()
@@ -9390,6 +9738,8 @@ async fn export_gpt_today_packages(
                 .unwrap_or(true)
         })
         .collect::<Vec<_>>();
+    let open_matches =
+        dedupe_matches_for_gpt_export(open_matches, &snapshots, &analyses, &recommendations);
     if open_matches.is_empty() {
         return Ok(json!({
             "success": false,
@@ -13423,6 +13773,150 @@ mod tests {
     };
     use rusqlite::Connection;
 
+    fn test_match_row(id: &str, home: &str, away: &str) -> MatchRow {
+        MatchRow {
+            id: id.to_string(),
+            match_num: id.to_string(),
+            league: "世界杯".to_string(),
+            time: "2026-07-01T20:00:00Z".to_string(),
+            home: home.to_string(),
+            away: away.to_string(),
+            status: "TIMED".to_string(),
+        }
+    }
+
+    fn test_recommendation(match_id: &str) -> Recommendation {
+        Recommendation {
+            match_id: match_id.to_string(),
+            match_num: "001".to_string(),
+            match_time: "2026-07-01T20:00:00Z".to_string(),
+            match_label: "英格兰 vs 刚果金".to_string(),
+            market: "HAD 胜平负".to_string(),
+            pick: "主胜".to_string(),
+            odds: 1.8,
+            fair_prob: 0.55,
+            model_prob: 0.62,
+            probability_gap: 0.07,
+            expected_return: 0.116,
+            stake_pct: 0.003,
+            europe_prob: None,
+            europe_gap: None,
+            europe_odds: None,
+            decision: "可买".to_string(),
+            confidence: "中".to_string(),
+            tier: "价值小注".to_string(),
+            play_style: String::new(),
+            combo_group: String::new(),
+            data_score: 85.0,
+            data_grade: "A".to_string(),
+            quality_action: "模型参考".to_string(),
+            support_factors: String::new(),
+            risk_factors: String::new(),
+            fair_odds: 1.61,
+            advantage_rate: 0.07,
+            action_advice: String::new(),
+            play_type_risk_level: String::new(),
+            lineup_status: String::new(),
+            lineup_confidence: 0.0,
+            anomaly_type: String::new(),
+            anomaly_severity: String::new(),
+            anomaly_direction: String::new(),
+            anomaly_advice: String::new(),
+            worldcup_correction_action: String::new(),
+            final_decision: "observe_only".to_string(),
+            reason: String::new(),
+        }
+    }
+
+    fn test_analysis(match_id: &str) -> MatchAnalysis {
+        MatchAnalysis {
+            match_id: match_id.to_string(),
+            match_num: "001".to_string(),
+            match_time: "2026-07-01T20:00:00Z".to_string(),
+            match_label: "英格兰 vs 刚果金".to_string(),
+            lambda_home: 1.4,
+            lambda_away: 0.9,
+            knockout_note: "淘汰赛90分钟".to_string(),
+            had: vec![
+                ProbItem {
+                    pick: "主胜".to_string(),
+                    probability: 0.62,
+                    fair_odds: 1.61,
+                    sporttery_prob: Some(0.55),
+                    sporttery_odds: Some(1.8),
+                    probability_gap: Some(0.07),
+                },
+                ProbItem {
+                    pick: "平局".to_string(),
+                    probability: 0.23,
+                    fair_odds: 4.35,
+                    sporttery_prob: Some(0.25),
+                    sporttery_odds: Some(3.6),
+                    probability_gap: Some(-0.02),
+                },
+            ],
+            hhad: vec![],
+            hhad_line: "-1".to_string(),
+            ttg: vec![ProbItem {
+                pick: "2球".to_string(),
+                probability: 0.28,
+                fair_odds: 3.57,
+                sporttery_prob: None,
+                sporttery_odds: None,
+                probability_gap: None,
+            }],
+            scores: vec![ProbItem {
+                pick: "1:1".to_string(),
+                probability: 0.11,
+                fair_odds: 9.09,
+                sporttery_prob: None,
+                sporttery_odds: None,
+                probability_gap: None,
+            }],
+            europe_note: "未匹配欧洲胜平负市场".to_string(),
+        }
+    }
+
+    fn test_snapshot(match_id: &str, odds_json: Value) -> PreMatchSnapshotRow {
+        PreMatchSnapshotRow {
+            id: 1,
+            match_id: match_id.to_string(),
+            external_fixture_id: String::new(),
+            provider_match_id: String::new(),
+            snapshot_time: "2026-07-01T18:00:00Z".to_string(),
+            kickoff_time: "2026-07-01T20:00:00Z".to_string(),
+            home_team: "英格兰".to_string(),
+            away_team: "刚果金".to_string(),
+            competition: "世界杯".to_string(),
+            season: "2026".to_string(),
+            stage: "Selling".to_string(),
+            model_version: "model-v1".to_string(),
+            model_probs_json: json!([{"market":"HAD","pick":"主胜","model_prob":0.62}]),
+            calibrated_probs_json: json!([]),
+            worldcup_correction_action: String::new(),
+            odds_json,
+            market_probs_json: json!({}),
+            ev_json: json!({"HAD":{"主胜":0.11}}),
+            data_quality_score: 88.0,
+            lineup_status: "unknown".to_string(),
+            lineup_confidence: 0.0,
+            injury_status: "unknown".to_string(),
+            injury_confidence: 0.0,
+            risk_tags_json: json!(["snapshot_test"]),
+            final_decision: "observe_only".to_string(),
+            decision_reason_json: json!([]),
+            paper_strategy_id: String::new(),
+            paper_trade_enabled: false,
+            raw_features_json: json!({}),
+            created_before_kickoff: true,
+            is_final_pre_match: true,
+            is_final_snapshot: true,
+            created_at: "2026-07-01T18:00:00Z".to_string(),
+            updated_at: "2026-07-01T18:00:00Z".to_string(),
+            settlement: None,
+        }
+    }
+
     #[test]
     fn quality_action_thresholds_are_clear() {
         assert_eq!(quality_action(54.9), "建议跳过");
@@ -15542,6 +16036,7 @@ mod tests {
             true,
             true,
             true,
+            "",
         );
         assert!(markdown.contains("赔率缺失，不能计算 EV"));
         assert!(markdown.contains("无赛前快照"));
@@ -15551,6 +16046,115 @@ mod tests {
         assert!(markdown.contains("请区分“赛果倾向”和“投注价值”"));
         assert!(!markdown.to_lowercase().contains("api_key"));
         assert!(!markdown.contains("secret-plain-key"));
+    }
+
+    #[test]
+    fn gpt_match_normalization_merges_congo_aliases() {
+        assert_eq!(canonical_team_name("刚果金"), "民主刚果");
+        assert_eq!(canonical_team_name("Congo DR"), "民主刚果");
+        let first = test_match_row("football-data-org-537426", "英格兰", "民主刚果");
+        let second = test_match_row("2040352", "英格兰", "刚果金");
+        assert_eq!(normalize_match_key(&first), normalize_match_key(&second));
+    }
+
+    #[test]
+    fn gpt_export_prefers_complete_duplicate_match_version() {
+        let matches = vec![
+            test_match_row("football-data-org-537426", "英格兰", "民主刚果"),
+            test_match_row("2040352", "英格兰", "刚果金"),
+        ];
+        let snapshots = vec![test_snapshot(
+            "2040352",
+            json!([{"market":"HAD","pick":"主胜","odds":1.8}]),
+        )];
+        let analyses = vec![test_analysis("2040352")];
+        let recommendations = vec![test_recommendation("2040352")];
+        let (best_id, merged_count, _score) = best_export_match_id_for(
+            "football-data-org-537426",
+            &matches,
+            &snapshots,
+            &analyses,
+            &recommendations,
+        );
+        assert_eq!(best_id, "2040352");
+        assert_eq!(merged_count, 2);
+        let deduped =
+            dedupe_matches_for_gpt_export(matches, &snapshots, &analyses, &recommendations);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].id, "2040352");
+    }
+
+    #[test]
+    fn gpt_export_normalizes_stage_and_raw_odds_status() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "create table odds_snapshots(id integer, match_id text, created_at text);
+             create table odds_movements(id integer, match_id text, market text, pick text, direction text, delta_pct real);",
+        )
+        .unwrap();
+        let match_row = test_match_row("2040352", "英格兰", "刚果金");
+        let analysis = test_analysis("2040352");
+        let snapshot = test_snapshot(
+            "2040352",
+            json!([{"market":"HAD","pick":"主胜","odds":1.8}]),
+        );
+        let markdown = build_gpt_analysis_package_markdown(
+            Some(&match_row),
+            Some(&analysis),
+            Some(&snapshot),
+            &[],
+            &[],
+            &conn,
+            true,
+            true,
+            true,
+            "本场匹配到多个来源，已优先选择有赔率/模型/模拟信息的快照。其他来源仅作为补充，不重复导出。",
+        );
+        assert!(!markdown.contains("* 阶段：TIMED"));
+        assert!(!markdown.contains("Selling"));
+        assert!(markdown.contains("* 阶段：淘汰赛（待确认轮次）"));
+        assert!(markdown.contains("赔率原始数据存在，但结构化表格未完全解析"));
+        assert!(markdown.contains("是否去重：是"));
+    }
+
+    #[test]
+    fn gpt_export_separates_snapshot_and_record_counts_and_limits_raw_odds() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "create table odds_snapshots(id integer, match_id text, created_at text);
+             create table odds_movements(id integer, match_id text, market text, pick text, direction text, delta_pct real);
+             insert into odds_snapshots values(1,'2040352','2026-07-01T18:00:00Z');
+             insert into odds_snapshots values(2,'2040352','2026-07-01T18:00:00Z');
+             insert into odds_snapshots values(3,'2040352','2026-07-01T19:00:00Z');
+             insert into odds_movements values(1,'2040352','HAD 胜平负','主胜','降赔',-0.02);",
+        )
+        .unwrap();
+        let raw = Value::Array(
+            (0..25)
+                .map(|idx| json!({"market":"HAD","pick":format!("p{}", idx),"odds":1.5}))
+                .collect(),
+        );
+        let match_row = test_match_row("2040352", "英格兰", "刚果金");
+        let analysis = test_analysis("2040352");
+        let rec = test_recommendation("2040352");
+        let snapshot = test_snapshot("2040352", raw);
+        let markdown = build_gpt_analysis_package_markdown(
+            Some(&match_row),
+            Some(&analysis),
+            Some(&snapshot),
+            &[rec],
+            &[],
+            &conn,
+            true,
+            true,
+            true,
+            "",
+        );
+        assert!(markdown.contains("* 赔率快照次数：2"));
+        assert!(markdown.contains("* 赔率记录条数：3"));
+        assert!(markdown.contains("仅展示前20条，完整数据请看软件。"));
+        assert!(markdown.contains("| 主胜 | 1.80 | 55.00% | 62.00% | +11.60% | 降赔 -2.00% |"));
+        assert!(!markdown.contains("| 平局 | 3.60 | 25.00% | 23.00% | -17.20% | 降赔 -2.00% |"));
     }
 
     #[test]
