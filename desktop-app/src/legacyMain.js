@@ -83,10 +83,10 @@ async function copyTextToClipboard(text) {
 }
 
 async function copyGptAnalysisPackage(matchId) {
-  const packageResult = await api.invokeCommand("gpt_analysis_package", { matchId });
+  const packageResult = await api.invokeCommand("copy_gpt_match_package", { matchId, snapshotId: null });
   state.gptAnalysisPackage = packageResult;
   await copyTextToClipboard(packageResult.markdown || "");
-  state.probeResult = { ok: true, message: "GPT 分析包已复制到剪贴板。", warning: packageResult.warning || "" };
+  state.probeResult = { ok: true, message: "已复制 GPT 分析包，可直接粘贴到 GPT 网页版。" };
 }
 
 async function copyTodayGptAnalysisPackages() {
@@ -97,7 +97,30 @@ async function copyTodayGptAnalysisPackages() {
 }
 
 async function exportTodayGptAnalysisPackages() {
-  state.probeResult = await api.invokeCommand("export_gpt_today_analysis_markdown");
+  state.probeResult = await api.invokeCommand("export_gpt_today_packages", {
+    request: {
+      includeSimulation: true,
+      includeUpsetLab: true,
+      includeRawOdds: true,
+      splitFiles: false
+    }
+  });
+}
+
+async function exportGptMatchPackage(matchId, snapshotId = null) {
+  state.probeResult = await api.invokeCommand("export_gpt_match_package", {
+    request: {
+      matchId,
+      snapshotId: snapshotId ? Number(snapshotId) : null,
+      includeSimulation: true,
+      includeUpsetLab: true,
+      includeRawOdds: true
+    }
+  });
+}
+
+async function openGptExportsDir() {
+  state.probeResult = await api.invokeCommand("open_gpt_exports_dir");
 }
 
 function prepareManualAnalysis(matchId, label = "") {
@@ -1408,7 +1431,7 @@ function recommendationRows(limit = 80) {
       <td>${money(item.stake_pct)}<div class="muted">${state.bankroll ? Math.round(item.stake_pct * state.bankroll.bankroll) : 0}</div></td>
       <td>${badge(item.final_decision || item.decision)}<div class="muted">${badge(item.decision)} <span class="badge">${item.confidence}</span></div><div class="muted reason">${item.action_advice || item.play_style}</div><div class="muted reason">风险等级：${item.play_type_risk_level || "-"}</div><div class="muted reason">赔率异常：${item.anomaly_type || "-"} ${item.anomaly_severity || ""} ${item.anomaly_advice || ""}</div><div class="muted reason">${item.reason}</div><div class="muted reason">支持：${item.support_factors || "-"}</div><div class="muted reason">风险：${item.risk_factors || "-"}</div></td>
       <td>${item.combo_group || "-"}</td>
-      <td><button class="mini" data-action="copy-gpt-package" data-match-id="${item.match_id}">复制GPT包</button><button class="mini" data-action="prepare-manual-analysis" data-match-id="${item.match_id}" data-match-label="${rankedMatchLabel(item.match_label)}">人工结论</button><button class="mini" data-action="save-rec" data-index="${index}">存复盘</button></td>
+      <td><button class="mini" data-action="copy-gpt-match-package" data-match-id="${item.match_id}">复制GPT包</button><button class="mini" data-action="export-gpt-match-package" data-match-id="${item.match_id}">导出到桌面</button><button class="mini" data-action="prepare-manual-analysis" data-match-id="${item.match_id}" data-match-label="${rankedMatchLabel(item.match_label)}">人工结论</button><button class="mini" data-action="save-rec" data-index="${index}">存复盘</button></td>
     </tr>
   `}).join("");
 }
@@ -1524,7 +1547,8 @@ function manualAnalysisPanelHtml() {
       <p class="muted">本工具只整理赛前数据和冻结快照，不保证预测准确。建议复制 GPT 分析包后，结合 GPT 网页版和人工判断再记录结论。</p>
       <div class="toolbar">
         <button class="btn secondary" data-action="copy-today-gpt-packages">批量复制今日 GPT 分析包</button>
-        <button class="btn secondary" data-action="export-today-gpt-packages">导出今日分析包 Markdown</button>
+        <button class="btn secondary" data-action="export-gpt-today-packages">一键导出今日全部GPT分析包</button>
+        <button class="btn secondary" data-action="open-gpt-exports-dir">打开GPT包目录</button>
         <span class="muted">当前记录对象：${label}</span>
       </div>
       <div class="plan-grid">
@@ -1598,7 +1622,8 @@ function todayPlanHtml() {
         <button class="btn secondary" data-action="refresh-core">刷新赔率并重算</button>
         <button class="btn secondary" data-action="freeze-rec">冻结赛前快照</button>
         <button class="btn secondary" data-action="copy-today-gpt-packages">批量复制今日 GPT 分析包</button>
-        <button class="btn secondary" data-action="export-today-gpt-packages">导出今日分析包 Markdown</button>
+        <button class="btn secondary" data-action="export-gpt-today-packages">一键导出今日全部GPT分析包</button>
+        <button class="btn secondary" data-action="open-gpt-exports-dir">打开GPT包目录</button>
         <button class="btn secondary" data-view="review">赛后复盘入口</button>
         <span class="muted">${plan?.review_hint || "今日方案会自动读取最新赛前快照；没有 final snapshot 时使用最新快照并提示复查。"}</span>
       </section>
@@ -1631,7 +1656,7 @@ function practicalRows(rows = [], emptyText = "暂无") {
       <td class="${item.ev == null ? "" : (item.ev || 0) >= 0 ? "down" : "up"}">${item.ev == null ? "赔率缺失，不能计算 EV" : signedPct(item.ev || 0)}</td>
       <td>${Number(item.data_score || 0).toFixed(0)}<div class="muted">${(item.missing_fields || []).length ? `缺失：${item.missing_fields.join("、")}` : "数据完整"}</div></td>
       <td>${money(item.bankroll_suggestion || 0)}<div class="muted reason">${item.reason || ""}</div><div class="muted reason">${item.odds_change_note || ""}</div><div class="muted reason">快照：${item.is_final_snapshot ? "final" : "非 final"} · 赔率快照 ${item.odds_snapshot_count ?? 0}</div><div class="muted reason">${item.risk_tags || ""}</div></td>
-      <td><button class="mini" data-action="copy-gpt-package" data-match-id="${item.match_id || ""}">复制GPT包</button><button class="mini" data-action="prepare-manual-analysis" data-match-id="${item.match_id || ""}" data-match-label="${rankedMatchLabel(item.match_label || "")}">人工结论</button></td>
+      <td><button class="mini" data-action="copy-gpt-match-package" data-match-id="${item.match_id || ""}">复制GPT包</button><button class="mini" data-action="export-gpt-match-package" data-match-id="${item.match_id || ""}">导出到桌面</button><button class="mini" data-action="prepare-manual-analysis" data-match-id="${item.match_id || ""}" data-match-label="${rankedMatchLabel(item.match_label || "")}">人工结论</button></td>
     </tr>
   `).join("");
 }
@@ -1750,7 +1775,8 @@ function snapshotRows() {
         <td>
           <button class="mini" data-action="create-pre-snapshot" data-match-id="${match.id}">生成当前快照</button>
           <button class="mini" data-action="view-snapshot-history" data-match-id="${match.id}" data-match-label="${rankedTeam(match.home)} vs ${rankedTeam(match.away)}">查看历史</button>
-          <button class="mini" data-action="copy-gpt-package" data-match-id="${match.id}">复制GPT包</button>
+          <button class="mini" data-action="copy-gpt-match-package" data-match-id="${match.id}">复制GPT包</button>
+          <button class="mini" data-action="export-gpt-match-package" data-match-id="${match.id}" data-snapshot-id="${snap?.id || ""}">导出到桌面</button>
           <button class="mini" data-action="prepare-manual-analysis" data-match-id="${match.id}" data-match-label="${rankedTeam(match.home)} vs ${rankedTeam(match.away)}">人工结论</button>
           ${snap ? `<button class="mini" data-action="mark-final-snapshot" data-snapshot-id="${snap.id}">标记最终</button>` : ""}
           ${snap ? `<button class="mini" data-action="settle-pre-snapshot" data-snapshot-id="${snap.id}">赛后结算</button>` : ""}
@@ -1934,7 +1960,8 @@ function preMatchSnapshotHtml() {
         <button class="btn secondary" data-action="audit-pre-snapshots">运行快照审计</button>
         <button class="btn secondary" data-action="settle-all-pre-snapshots">赛后批量结算</button>
         <button class="btn secondary" data-action="copy-today-gpt-packages">批量复制今日 GPT 分析包</button>
-        <button class="btn secondary" data-action="export-today-gpt-packages">导出今日分析包 Markdown</button>
+        <button class="btn secondary" data-action="export-gpt-today-packages">一键导出今日全部GPT分析包</button>
+        <button class="btn secondary" data-action="open-gpt-exports-dir">打开GPT包目录</button>
         <button class="btn secondary" data-action="export-app-data">导出全部数据</button>
         <button class="btn secondary" data-action="export-snapshots">导出赛前快照</button>
         <button class="btn secondary" data-action="export-snapshot-results">导出赛后结算</button>
@@ -2072,7 +2099,8 @@ function predictionCenterHtml() {
       <section class="panel span-12 toolbar">
         <button class="btn" data-action="refresh-analysis">刷新预测</button>
         <button class="btn secondary" data-action="copy-today-gpt-packages">批量复制今日 GPT 分析包</button>
-        <button class="btn secondary" data-action="export-today-gpt-packages">导出今日分析包 Markdown</button>
+        <button class="btn secondary" data-action="export-gpt-today-packages">一键导出今日全部GPT分析包</button>
+        <button class="btn secondary" data-action="open-gpt-exports-dir">打开GPT包目录</button>
         <span class="muted">这里只显示真实概率预测，不代表值得下注；日常决策请看“今日方案”。</span>
       </section>
       ${manualAnalysisPanelHtml()}
@@ -2098,7 +2126,8 @@ function predictionCenterHtml() {
               <div class="panel span-3 metric"><span>比分Top</span><strong>${score?.pick || "-"}</strong><div class="muted">${score ? pct(score.probability) : "-"}</div></div>
             </div>
             <div class="actions">
-              <button class="mini" data-action="copy-gpt-package" data-match-id="${item.match_id}">复制GPT包</button>
+              <button class="mini" data-action="copy-gpt-match-package" data-match-id="${item.match_id}">复制GPT包</button>
+              <button class="mini" data-action="export-gpt-match-package" data-match-id="${item.match_id}">导出到桌面</button>
               <button class="mini" data-action="prepare-manual-analysis" data-match-id="${item.match_id}" data-match-label="${rankedMatchLabel(item.match_label)}">人工结论</button>
               ${analysisSaveButtons(matchIndex, "had", item.had, [had])}
               ${analysisSaveButtons(matchIndex, "hhad", item.hhad, [hhad])}
@@ -2291,7 +2320,8 @@ function singleMatchAnalysisHtml() {
         </label>
         <button class="btn" data-action="refresh-analysis">重新分析本场</button>
         ${item ? `<button class="btn secondary" data-action="create-pre-snapshot" data-match-id="${state.selectedAnalysisMatchId || state.matches[0]?.id || item.match_id}">生成赛前快照</button>` : ""}
-        ${item ? `<button class="btn secondary" data-action="copy-gpt-package" data-match-id="${state.selectedAnalysisMatchId || state.matches[0]?.id || item.match_id}">复制本场 GPT 分析包</button>` : ""}
+        ${item ? `<button class="btn secondary" data-action="copy-gpt-match-package" data-match-id="${state.selectedAnalysisMatchId || state.matches[0]?.id || item.match_id}">复制本场 GPT 分析包</button>` : ""}
+        ${item ? `<button class="btn secondary" data-action="export-gpt-match-package" data-match-id="${state.selectedAnalysisMatchId || state.matches[0]?.id || item.match_id}">导出本场到桌面</button>` : ""}
         ${item ? `<button class="btn secondary" data-action="prepare-manual-analysis" data-match-id="${state.selectedAnalysisMatchId || state.matches[0]?.id || item.match_id}" data-match-label="${rankedMatchLabel(item.match_label)}">标记人工分析</button>` : ""}
         <span class="muted">选择比赛会自动读取最新模型概率、赔率、赛前快照和市场差异。</span>
       </section>
@@ -2662,7 +2692,7 @@ function simHtml() {
         <section class="panel span-3 metric"><span>平局</span><strong>${pct(sim.draw)}</strong><div class="muted">95% ${ciText(sim.draw_low, sim.draw_high)}</div></section>
         <section class="panel span-3 metric"><span>客胜</span><strong>${pct(sim.away_win)}</strong><div class="muted">95% ${ciText(sim.away_win_low, sim.away_win_high)} · λ ${sim.lambda_away.toFixed(2)}</div></section>
         <section class="panel span-3 metric"><span>大2.5 / 双方进球</span><strong>${pct(sim.over_25)}</strong><div class="muted">大2.5区间 ${ciText(sim.over_25_low, sim.over_25_high)} · BTTS ${pct(sim.btts)}</div></section>
-        <section class="panel span-12"><h3>当前概率模型</h3><p class="muted">${sim.model_version || "rules-dixon-coles-v1"}；投注推荐层独立按赔率、EV、数据质量和风险标签过滤，不直接训练“买/不买”。</p></section>
+        <section class="panel span-12"><h3>当前概率模型</h3><p class="muted">${sim.model_version || "rules-dixon-coles-v1"}；投注推荐层独立按赔率、EV、数据质量和风险标签过滤，不直接训练“买/不买”。</p><button class="btn secondary" data-action="export-gpt-match-package" data-match-id="${state.selectedSimMatchId || state.selectedAnalysisMatchId || ""}">导出含模拟信息的GPT分析包</button></section>
         <section class="panel span-8">
           <h3>综合概率对比</h3>
           <table>
@@ -2956,9 +2986,11 @@ document.addEventListener("click", event => {
   if (action === "refresh-current-view") safeRun("同步当前页", async () => refreshViewContext(state.view, "手动", true));
   if (action === "refresh-today") safeRun("重新生成今日方案", async () => refreshTodayContext("手动"));
   if (action === "refresh-core") safeRun("刷新核心数据", refreshCore);
-  if (action === "copy-gpt-package") safeRun("复制 GPT 分析包", async () => copyGptAnalysisPackage(event.target.dataset.matchId));
+  if (action === "copy-gpt-package" || action === "copy-gpt-match-package") safeRun("复制 GPT 分析包", async () => copyGptAnalysisPackage(event.target.dataset.matchId));
+  if (action === "export-gpt-match-package") safeRun("导出 GPT 分析包到桌面", async () => exportGptMatchPackage(event.target.dataset.matchId, event.target.dataset.snapshotId));
   if (action === "copy-today-gpt-packages") safeRun("批量复制 GPT 分析包", copyTodayGptAnalysisPackages);
-  if (action === "export-today-gpt-packages") safeRun("导出 GPT 分析包", exportTodayGptAnalysisPackages);
+  if (action === "export-today-gpt-packages" || action === "export-gpt-today-packages") safeRun("导出 GPT 分析包", exportTodayGptAnalysisPackages);
+  if (action === "open-gpt-exports-dir") safeRun("打开 GPT 分析包目录", openGptExportsDir);
   if (action === "prepare-manual-analysis") {
     prepareManualAnalysis(event.target.dataset.matchId, event.target.dataset.matchLabel);
     render();

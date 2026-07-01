@@ -8163,12 +8163,103 @@ struct ManualAnalysisInput {
     raw_response: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportGptMatchPackageRequest {
+    match_id: String,
+    snapshot_id: Option<i64>,
+    include_simulation: Option<bool>,
+    include_upset_lab: Option<bool>,
+    include_raw_odds: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportGptTodayPackagesRequest {
+    date: Option<String>,
+    include_simulation: Option<bool>,
+    include_upset_lab: Option<bool>,
+    include_raw_odds: Option<bool>,
+    split_files: Option<bool>,
+}
+
 fn compact_json_text(value: &Value) -> String {
     if value.is_null() {
         "-".to_string()
     } else {
         serde_json::to_string(value).unwrap_or_else(|_| "-".to_string())
     }
+}
+
+fn sanitize_file_component(value: &str) -> String {
+    let mut out = value
+        .chars()
+        .map(|ch| match ch {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            ch if ch.is_control() => '_',
+            ch => ch,
+        })
+        .collect::<String>();
+    out = out
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("_")
+        .trim_matches('_')
+        .to_string();
+    if out.is_empty() {
+        "未命名比赛".to_string()
+    } else {
+        out
+    }
+}
+
+fn gpt_exports_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let desktop = std::env::var("USERPROFILE")
+        .ok()
+        .map(|home| PathBuf::from(home).join("Desktop"))
+        .filter(|path| path.exists());
+    let dir = desktop
+        .map(|path| path.join("世界杯GPT分析包"))
+        .unwrap_or_else(|| {
+            app_dir(app)
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join("exports")
+                .join("gpt_analysis_packages")
+        });
+    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    Ok(dir)
+}
+
+fn package_date_from_time(match_time: &str) -> String {
+    match_time
+        .get(0..10)
+        .filter(|value| value.chars().filter(|ch| *ch == '-').count() == 2)
+        .unwrap_or_else(|| "")
+        .to_string()
+        .if_empty_with(|| Utc::now().format("%Y-%m-%d").to_string())
+}
+
+trait EmptyStringFallback {
+    fn if_empty_with<F: FnOnce() -> String>(self, fallback: F) -> String;
+}
+
+impl EmptyStringFallback for String {
+    fn if_empty_with<F: FnOnce() -> String>(self, fallback: F) -> String {
+        if self.trim().is_empty() {
+            fallback()
+        } else {
+            self
+        }
+    }
+}
+
+fn unique_markdown_path(dir: &Path, base_name: &str) -> PathBuf {
+    let base = sanitize_file_component(base_name);
+    let first = dir.join(format!("{base}.md"));
+    if !first.exists() {
+        return first;
+    }
+    dir.join(format!("{}_{}.md", base, Utc::now().format("%H%M%S")))
 }
 
 fn prob_item_lines(items: &[ProbItem], limit: usize) -> String {
@@ -8225,6 +8316,385 @@ fn recommendation_lines(recommendations: &[Recommendation]) -> String {
         .join("\n")
 }
 
+fn recommendation_lookup<'a>(
+    recommendations: &'a [Recommendation],
+    market_prefix: &str,
+    pick: &str,
+) -> Option<&'a Recommendation> {
+    recommendations.iter().find(|item| {
+        item.market.starts_with(market_prefix)
+            && (item.pick == pick || item.pick.contains(pick) || pick.contains(&item.pick))
+    })
+}
+
+fn prob_for<'a>(items: &'a [ProbItem], pick: &str) -> Option<&'a ProbItem> {
+    items
+        .iter()
+        .find(|item| item.pick == pick || item.pick.contains(pick) || pick.contains(&item.pick))
+}
+
+fn fmt_pct_cell(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{:.2}%", value * 100.0))
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn fmt_num_cell(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{:.2}", value))
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn fmt_ev_cell(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{:+.2}%", value * 100.0))
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn odds_row_for(
+    recommendations: &[Recommendation],
+    analysis: Option<&MatchAnalysis>,
+    market_prefix: &str,
+    pick: &str,
+    change: &str,
+) -> String {
+    let rec = recommendation_lookup(recommendations, market_prefix, pick);
+    let prob = analysis.and_then(|analysis| match market_prefix {
+        "HAD" => prob_for(&analysis.had, pick),
+        "HHAD" => prob_for(&analysis.hhad, pick),
+        "TTG" => prob_for(&analysis.ttg, pick),
+        "CRS" => prob_for(&analysis.scores, pick),
+        _ => None,
+    });
+    let odds_value = rec
+        .map(|item| item.odds)
+        .or_else(|| prob.and_then(|item| item.sporttery_odds));
+    let market_prob = rec
+        .map(|item| item.fair_prob)
+        .or_else(|| prob.and_then(|item| item.sporttery_prob));
+    let model_prob = rec
+        .map(|item| item.model_prob)
+        .or_else(|| prob.map(|item| item.probability));
+    let ev = rec
+        .map(|item| item.expected_return)
+        .or_else(|| model_prob.and_then(|prob| odds_value.map(|odds| prob * odds - 1.0)));
+    format!(
+        "| {} | {} | {} | {} | {} | {} |",
+        pick,
+        fmt_num_cell(odds_value),
+        fmt_pct_cell(market_prob),
+        fmt_pct_cell(model_prob),
+        fmt_ev_cell(ev),
+        change
+    )
+}
+
+fn hhad_row_for(
+    recommendations: &[Recommendation],
+    analysis: Option<&MatchAnalysis>,
+    line: &str,
+    pick: &str,
+    change: &str,
+) -> String {
+    let cells = odds_row_for(recommendations, analysis, "HHAD", pick, change);
+    cells.replacen("| ", &format!("| {} | ", line), 1)
+}
+
+fn odds_tables_markdown(
+    recommendations: &[Recommendation],
+    analysis: Option<&MatchAnalysis>,
+    movement_note: &str,
+) -> String {
+    let hhad_line = analysis
+        .map(|item| item.hhad_line.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("-");
+    let ttg_rows = analysis
+        .map(|analysis| {
+            let mut rows = analysis.ttg.iter().collect::<Vec<_>>();
+            rows.sort_by(|a, b| {
+                b.probability
+                    .partial_cmp(&a.probability)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            rows.into_iter()
+                .take(8)
+                .map(|item| {
+                    odds_row_for(
+                        recommendations,
+                        analysis.into(),
+                        "TTG",
+                        item.pick.as_str(),
+                        movement_note,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_else(|| "| - | - | - | - | - | - |".to_string());
+    let score_rows = analysis
+        .map(|analysis| {
+            analysis
+                .scores
+                .iter()
+                .take(10)
+                .map(|item| {
+                    odds_row_for(
+                        recommendations,
+                        analysis.into(),
+                        "CRS",
+                        &item.pick,
+                        movement_note,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_else(|| "| - | - | - | - | - | - |".to_string());
+    format!(
+        r#"### HAD 胜平负
+
+| 选项 | 赔率 | 市场概率 | 模型概率 | EV | 变化 |
+| -- | -: | ---: | ---: | -: | -- |
+{had_home}
+{had_draw}
+{had_away}
+
+### HHAD 让球胜平负
+
+| 盘口 | 选项 | 赔率 | 市场概率 | 模型概率 | EV | 变化 |
+| -- | -- | -: | ---: | ---: | -: | -- |
+{hhad_home}
+{hhad_draw}
+{hhad_away}
+
+### TTG 总进球
+
+| 总进球 | 赔率 | 市场概率 | 模型概率 | EV | 变化 |
+| --- | -: | ---: | ---: | -: | -- |
+{ttg_rows}
+
+### 比分赔率 Top
+
+| 比分 | 赔率 | 市场概率 | 模型概率 | EV | 变化 |
+| -- | -: | ---: | ---: | -: | -- |
+{score_rows}
+"#,
+        had_home = odds_row_for(recommendations, analysis, "HAD", "主胜", movement_note),
+        had_draw = odds_row_for(recommendations, analysis, "HAD", "平局", movement_note),
+        had_away = odds_row_for(recommendations, analysis, "HAD", "客胜", movement_note),
+        hhad_home = hhad_row_for(recommendations, analysis, hhad_line, "让胜", movement_note),
+        hhad_draw = hhad_row_for(recommendations, analysis, hhad_line, "让平", movement_note),
+        hhad_away = hhad_row_for(recommendations, analysis, hhad_line, "让负", movement_note),
+        ttg_rows = ttg_rows,
+        score_rows = score_rows,
+    )
+}
+
+fn simulation_markdown_from_analysis(analysis: Option<&MatchAnalysis>) -> (String, bool) {
+    let Some(analysis) = analysis else {
+        return (
+            "暂无模拟比赛数据，请先在模拟对决页面生成模拟结果。".to_string(),
+            false,
+        );
+    };
+    let mut matrix = score_distribution(analysis.lambda_home, analysis.lambda_away, 8);
+    normalize_score_probs(&mut matrix);
+    apply_dixon_coles(
+        &mut matrix,
+        analysis.lambda_home,
+        analysis.lambda_away,
+        -0.10,
+    );
+    let (home_win, draw, away_win) = threeway_from_scores(&matrix);
+    let home_win_one: f64 = matrix
+        .iter()
+        .filter(|(h, a, _)| *h as i32 - *a as i32 == 1)
+        .map(|(_, _, p)| *p)
+        .sum();
+    let home_win_two_plus: f64 = matrix
+        .iter()
+        .filter(|(h, a, _)| *h as i32 - *a as i32 >= 2)
+        .map(|(_, _, p)| *p)
+        .sum();
+    let away_not_lose = draw + away_win;
+    let btts: f64 = matrix
+        .iter()
+        .filter(|(h, a, _)| *h > 0 && *a > 0)
+        .map(|(_, _, p)| *p)
+        .sum();
+    let over_25: f64 = matrix
+        .iter()
+        .filter(|(h, a, _)| h + a >= 3)
+        .map(|(_, _, p)| *p)
+        .sum();
+    let under_25 = 1.0 - over_25;
+    let total_0_1: f64 = matrix
+        .iter()
+        .filter(|(h, a, _)| h + a <= 1)
+        .map(|(_, _, p)| *p)
+        .sum();
+    let total_2_3: f64 = matrix
+        .iter()
+        .filter(|(h, a, _)| (2..=3).contains(&(h + a)))
+        .map(|(_, _, p)| *p)
+        .sum();
+    let total_4_plus: f64 = matrix
+        .iter()
+        .filter(|(h, a, _)| h + a >= 4)
+        .map(|(_, _, p)| *p)
+        .sum();
+    let mut top_scores = matrix
+        .iter()
+        .map(|(h, a, p)| (format!("{}:{}", h, a), *p))
+        .collect::<Vec<_>>();
+    top_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let score_rows = top_scores
+        .iter()
+        .take(10)
+        .map(|(score, prob)| format!("| {} | {:.2}% |", score, prob * 100.0))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let total_rows = (0..=7)
+        .map(|total| {
+            let prob: f64 = matrix
+                .iter()
+                .filter(|(h, a, _)| {
+                    if total == 7 {
+                        h + a >= 7
+                    } else {
+                        h + a == total
+                    }
+                })
+                .map(|(_, _, p)| *p)
+                .sum();
+            format!(
+                "| {} | {:.2}% |",
+                if total == 7 {
+                    "7+球".to_string()
+                } else {
+                    format!("{}球", total)
+                },
+                prob * 100.0
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut scripts = Vec::new();
+    if home_win > 0.48 && home_win_two_plus < 0.28 {
+        scripts.push("模拟显示强队胜面较大，但大胜穿盘不稳，更像小胜剧本。");
+    }
+    if draw >= 0.27 {
+        scripts.push("模拟显示冷平风险偏高。");
+    }
+    if btts >= 0.52 {
+        scripts.push("模拟显示双方都有进球可能。");
+    }
+    if under_25 >= 0.55 {
+        scripts.push("模拟偏向低比分控制局。");
+    }
+    if scripts.is_empty() {
+        scripts.push("模拟未显示单一极端剧本，建议结合赔率变化和数据质量复核。");
+    }
+    (
+        format!(
+            r#"### 模拟对决摘要
+
+* 模拟次数：轻量矩阵 9x9（基于 λ 和 Dixon-Coles 修正）
+* 主队平均进球：{lh:.2}
+* 客队平均进球：{la:.2}
+* 主胜概率：{hw:.2}%
+* 平局概率：{dr:.2}%
+* 客胜概率：{aw:.2}%
+* 主队赢 1 球概率：{hw1:.2}%
+* 主队赢 2 球以上概率：{hw2:.2}%
+* 客队不败概率：{anl:.2}%
+* 双方进球 BTTS 概率：{btts:.2}%
+* 大于 2.5 球概率：{over:.2}%
+* 小于 2.5 球概率：{under:.2}%
+* 0-1球概率：{low:.2}%
+* 2-3球概率：{mid:.2}%
+* 4球以上概率：{high:.2}%
+
+### 模拟比分 Top10
+
+| 比分 | 模拟概率 |
+| -- | ---: |
+{score_rows}
+
+### 模拟总进球分布
+
+| 总进球 | 概率 |
+| --- | -: |
+{total_rows}
+
+### 模拟剧本判断
+
+{scripts}
+"#,
+            lh = analysis.lambda_home,
+            la = analysis.lambda_away,
+            hw = home_win * 100.0,
+            dr = draw * 100.0,
+            aw = away_win * 100.0,
+            hw1 = home_win_one * 100.0,
+            hw2 = home_win_two_plus * 100.0,
+            anl = away_not_lose * 100.0,
+            btts = btts * 100.0,
+            over = over_25 * 100.0,
+            under = under_25 * 100.0,
+            low = total_0_1 * 100.0,
+            mid = total_2_3 * 100.0,
+            high = total_4_plus * 100.0,
+            score_rows = score_rows,
+            total_rows = total_rows,
+            scripts = scripts
+                .into_iter()
+                .map(|text| format!("* {}", text))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        true,
+    )
+}
+
+fn upset_table_markdown(upset_candidates: &[Value]) -> String {
+    if upset_candidates.is_empty() {
+        return "今日无符合条件的冷门候选，或赔率/快照不足。".to_string();
+    }
+    let rows = upset_candidates
+        .iter()
+        .take(20)
+        .map(|item| {
+            format!(
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+                item.get("play_pool").and_then(Value::as_str).unwrap_or("-"),
+                item.get("play_type").and_then(Value::as_str).unwrap_or("-"),
+                item.get("selection").and_then(Value::as_str).unwrap_or("-"),
+                fmt_num_cell(item.get("odds").and_then(Value::as_f64)),
+                fmt_pct_cell(item.get("model_prob").and_then(Value::as_f64)),
+                fmt_ev_cell(item.get("ev").and_then(Value::as_f64)),
+                fmt_num_cell(item.get("upset_score").and_then(Value::as_f64)),
+                fmt_num_cell(item.get("chaos_score").and_then(Value::as_f64)),
+                item.get("final_lab_decision")
+                    .and_then(Value::as_str)
+                    .unwrap_or("-"),
+                item.get("risk_level")
+                    .and_then(Value::as_str)
+                    .unwrap_or("-")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        r#"| 池子 | 玩法 | 选择 | 赔率 | 模型概率 | EV | 冷门分 | 混沌分 | 决策 | 风险 |
+| -- | -- | -- | -: | ---: | -: | --: | --: | -- | -- |
+{rows}
+
+冷门实验室为高风险实验，不进入正式推荐。"#
+    )
+}
+
 fn display_decision_label(decision: &str) -> &str {
     match decision {
         "可买" | "recommend" => "模型倾向",
@@ -8259,6 +8729,20 @@ fn pick_snapshot_for_match<'a>(
                 item.id,
             )
         })
+}
+
+fn pick_snapshot_for_match_with_id<'a>(
+    snapshots: &'a [PreMatchSnapshotRow],
+    match_id: &str,
+    snapshot_id: Option<i64>,
+) -> Option<&'a PreMatchSnapshotRow> {
+    snapshot_id
+        .and_then(|id| {
+            snapshots
+                .iter()
+                .find(|item| item.id == id && item.match_id == match_id)
+        })
+        .or_else(|| pick_snapshot_for_match(snapshots, match_id))
 }
 
 fn odds_snapshot_count_for_match(conn: &Connection, match_id: &str) -> i64 {
@@ -8312,7 +8796,10 @@ fn gpt_questions_markdown() -> &'static str {
 4. 哪些玩法应回避？
 5. 如果只选一个最稳方向，选什么？
 6. 如果做冷门实验，哪个方向最值得小额观察？
-7. 比分只给参考，不要强行推荐高风险比分。"#
+7. 比分只给参考，不要强行推荐高风险比分。
+8. 请区分“赛果倾向”和“投注价值”。
+9. 如果软件数据有自相矛盾，请指出并降低置信度。
+10. 请给出最终分层建议：主方向 / 观察方向 / 回避方向 / 比分参考。"#
 }
 
 fn build_gpt_analysis_package_markdown(
@@ -8322,6 +8809,9 @@ fn build_gpt_analysis_package_markdown(
     recommendations: &[Recommendation],
     upset_candidates: &[Value],
     conn: &Connection,
+    include_simulation: bool,
+    include_upset_lab: bool,
+    include_raw_odds: bool,
 ) -> String {
     let match_id = match_row
         .map(|item| item.id.as_str())
@@ -8348,6 +8838,14 @@ fn build_gpt_analysis_package_markdown(
         .or_else(|| snapshot.map(|item| item.stage.as_str()))
         .unwrap_or("-");
     let odds_count = odds_snapshot_count_for_match(conn, match_id);
+    let odds_batch_count = odds_snapshot_batches(conn, match_id);
+    let latest_odds_time = conn
+        .query_row(
+            "select created_at from odds_snapshots where match_id=?1 order by id desc limit 1",
+            params![match_id],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| "-".to_string());
     let movement_note = movement_note_for_match(conn, match_id);
     let has_odds = recommendations.iter().any(|item| item.odds > 1.0)
         || snapshot
@@ -8402,56 +8900,135 @@ fn build_gpt_analysis_package_markdown(
             )
         })
         .unwrap_or_else(|| "无正式推荐，仅做模型参考。".to_string());
+    let (simulation_markdown, _has_simulation) = if include_simulation {
+        simulation_markdown_from_analysis(analysis)
+    } else {
+        ("本次导出未包含模拟比赛信息。".to_string(), false)
+    };
+    let odds_tables = odds_tables_markdown(recommendations, analysis, &movement_note);
+    let upset_markdown = if include_upset_lab {
+        upset_table_markdown(upset_candidates)
+    } else {
+        "本次导出未包含冷门实验室摘要。".to_string()
+    };
+    let raw_odds_text = if include_raw_odds {
+        snapshot
+            .map(|item| compact_json_text(&item.odds_json))
+            .unwrap_or_else(|| "-".to_string())
+    } else {
+        "未导出 raw_odds。".to_string()
+    };
+    let missing_fields = if has_odds {
+        Vec::<&str>::new()
+    } else {
+        vec!["odds", "market_prob", "ev"]
+    };
+    let data_advice = recommendations
+        .first()
+        .map(|item| item.quality_action.clone())
+        .unwrap_or_else(|| "仅可作为基础资料，建议人工确认。".to_string());
+    let observe_directions = recommendations
+        .iter()
+        .filter(|item| item.decision != "禁止")
+        .take(5)
+        .map(|item| format!("{} {}", item.market, item.pick))
+        .collect::<Vec<_>>()
+        .join("；");
+    let banned_directions = recommendations
+        .iter()
+        .filter(|item| item.decision == "禁止" || item.final_decision == "hard_ban")
+        .take(5)
+        .map(|item| format!("{} {}", item.market, item.pick))
+        .collect::<Vec<_>>()
+        .join("；");
     format!(
         r#"# GPT赛前分析包：{label}
 
 > 本分析包用于复制到 GPT 网页版或人工复核。软件不保证预测准确，自动推荐默认作为 observation_only 参考；比分、总进球、冷门玩法默认观察。
 
 ## 1. 基础信息
-- match_id：{match_id}
-- 比赛时间：{kickoff}
-- 阶段：{stage}
-- 主队：{home}（FIFA排名：{home_rank}）
-- 客队：{away}（FIFA排名：{away_rank}）
-- 是否淘汰赛：{is_knockout}
-- 是否中立场：世界杯默认中立/赛会制，需人工确认实际场地。
-- 快照状态：{frozen_note}
+* match_id：{match_id}
+* snapshot_id：{snapshot_id}
+* 比赛时间：{kickoff}
+* 阶段：{stage}
+* 主队：{home}
+* 客队：{away}
+* FIFA排名：{home_rank} / {away_rank}
+* Elo / 动态评分：暂无独立 Elo 输出，当前以模型 λ、FIFA 排名和历史赛果综合估计。
+* 是否淘汰赛：{is_knockout}
+* 是否中立场：世界杯默认中立/赛会制，需人工确认实际场地。
+* 快照状态：{frozen_note}
+* 是否 final snapshot：{is_final_snapshot}
+* 是否赛前生成：{created_before_kickoff}
+* 数据质量分：{data_quality:.0}
 
 ## 2. 赔率信息
-- 赔率状态：{missing_odds_note}
-- 赔率快照数量：{odds_count}
-- 赔率变化方向：{movement_note}
-- 快照赔率原始摘要：{snapshot_odds}
-- 盘口/EV 摘要：{snapshot_ev}
+
+{odds_tables}
+
+### 赔率快照摘要
+
+* 赔率状态：{missing_odds_note}
+* 赔率快照次数：{odds_batch_count}
+* 赔率记录条数：{odds_count}
+* 市场数量：{market_count}
+* 最近快照时间：{latest_odds_time}
+* 赔率变化方向：{movement_note}
+* 快照不足提示：{snapshot_warning}
+* 快照赔率原始摘要：{raw_odds_text}
+* 盘口/EV 摘要：{snapshot_ev}
 
 ## 3. 模型输出
-- 模型版本：{model_version}
-- 数据质量分：{data_quality:.0}
-- 是否使用 fallback：{fallback}
-- HAD 胜平负：
+* 模型版本：{model_version}
+* 是否 fallback：{fallback}
+* 数据质量分：{data_quality:.0}
+* HAD 胜平负概率：
 {had}
-- HHAD 让球胜平负：
+* HHAD 让球胜平负概率：
 {hhad}
-- TTG 总进球 Top3：
+* TTG 总进球 Top3：
 {ttg}
-- 比分 Top5：
+* 比分 Top5：
 {scores}
+* 世界杯比分先验提示：只轻度参与，不覆盖主模型概率。
+* 过拟合保护提示：1:1、2球、3:3 只能作为候选和复盘标签，不能覆盖模型概率。
 
-## 4. 风险信息
-- 伤停状态：{injury_status}
-- 首发状态：{lineup_status}
-- 风险标签：{risk_tags}
-- 冷门实验室标签：
+## 4. 模拟比赛信息
+
+{simulation_markdown}
+
+## 5. 风险信息
+
+* 首发状态：{lineup_status}
+* 伤停状态：{injury_status}
+* xG 是否缺失：{xg_missing}
+* 数据缺失项：{missing_fields}
+* 赔率异常：{movement_note}
+* 快照不足：{snapshot_warning}
+* hard_ban 标签：{hard_ban_tags}
+* 冷门实验室标签：
 {upset_lines}
-- 过拟合保护提示：1:1、2球、3:3 只能作为候选和复盘标签，不能覆盖模型概率。
+* 是否存在高赔率幻觉：高赔率比分和 3:3 仅作为极端观察，不进入正式推荐。
+* 是否存在过拟合保护提示：是。
+* 是否 1:1 / 2球 / 3:3 仅作为候选：是。
 
-## 5. 软件建议
-- 软件倾向：{top_recommendation}
-- 明细：
+## 6. 软件建议
+
+* 模型倾向：{top_recommendation}
+* 数据建议：{data_advice}
+* 观察方向：{observe_directions}
+* 禁买方向：{banned_directions}
+* 仓位参考：仅作为风险控制参考，不是自动投注指令。
+* 主要理由：
 {recommendation_lines}
-- 说明：这里是模型辅助与数据建议，不是自动投注指令；最终判断建议结合 GPT 网页版或人工分析。
+* 主要风险：{risk_tags}
+* 说明：这里是模型辅助与数据建议，不是自动投注指令；最终判断建议结合 GPT 网页版或人工分析。
 
-## 6. 需要 GPT 重点分析的问题
+## 7. 冷门实验室摘要
+
+{upset_markdown}
+
+## 8. 需要 GPT 重点分析的问题
 {questions}
 "#,
         label = label,
@@ -8472,12 +9049,39 @@ fn build_gpt_analysis_package_markdown(
             "需确认"
         },
         frozen_note = frozen_note,
+        snapshot_id = snapshot
+            .map(|item| item.id.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        is_final_snapshot = snapshot
+            .map(|item| if item.is_final_pre_match {
+                "是"
+            } else {
+                "否"
+            })
+            .unwrap_or("否"),
+        created_before_kickoff = snapshot
+            .map(|item| if item.created_before_kickoff {
+                "是"
+            } else {
+                "否"
+            })
+            .unwrap_or("未知"),
         missing_odds_note = missing_odds_note,
         odds_count = odds_count,
+        odds_batch_count = odds_batch_count,
+        latest_odds_time = latest_odds_time,
         movement_note = movement_note,
-        snapshot_odds = snapshot
-            .map(|item| compact_json_text(&item.odds_json))
-            .unwrap_or_else(|| "-".to_string()),
+        market_count = recommendations
+            .iter()
+            .map(|item| item.market.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        snapshot_warning = if odds_batch_count < 2 {
+            "快照不足，无法判断变化。"
+        } else {
+            "快照数量可用于初步观察。"
+        },
+        raw_odds_text = raw_odds_text,
         snapshot_ev = snapshot
             .map(|item| compact_json_text(&item.ev_json))
             .unwrap_or_else(|| "-".to_string()),
@@ -8495,6 +9099,7 @@ fn build_gpt_analysis_package_markdown(
         } else {
             "是/缺少模型分析，仅基础信息"
         },
+        odds_tables = odds_tables,
         had = analysis
             .map(|item| prob_item_lines(&item.had, 3))
             .unwrap_or_else(|| "-".to_string()),
@@ -8507,6 +9112,7 @@ fn build_gpt_analysis_package_markdown(
         scores = analysis
             .map(|item| prob_item_lines(&item.scores, 5))
             .unwrap_or_else(|| "-".to_string()),
+        simulation_markdown = simulation_markdown,
         injury_status = snapshot
             .map(|item| item.injury_status.as_str())
             .unwrap_or("unknown"),
@@ -8520,14 +9126,45 @@ fn build_gpt_analysis_package_markdown(
                 .map(|item| item.risk_factors.clone())
                 .collect::<Vec<_>>()
                 .join("；")),
+        xg_missing = if recommendations
+            .iter()
+            .any(|item| item.risk_factors.contains("xG") || item.risk_factors.contains("统计"))
+        {
+            "可能缺失"
+        } else {
+            "未见明确缺失标签"
+        },
+        missing_fields = if missing_fields.is_empty() {
+            "-".to_string()
+        } else {
+            missing_fields.join("、")
+        },
+        hard_ban_tags = recommendations
+            .iter()
+            .filter(|item| item.final_decision == "hard_ban" || item.decision == "禁止")
+            .map(|item| format!("{} {}", item.market, item.pick))
+            .collect::<Vec<_>>()
+            .join("；")
+            .if_empty_with(|| "-".to_string()),
         upset_lines = upset_lines,
         top_recommendation = top_recommendation,
+        data_advice = data_advice,
+        observe_directions = observe_directions.if_empty_with(|| "-".to_string()),
+        banned_directions = banned_directions.if_empty_with(|| "-".to_string()),
         recommendation_lines = recommendation_lines(recommendations),
+        upset_markdown = upset_markdown,
         questions = gpt_questions_markdown(),
     )
 }
 
-async fn build_gpt_analysis_package(app: AppHandle, match_id: String) -> Result<Value, String> {
+async fn build_gpt_analysis_package(
+    app: AppHandle,
+    match_id: String,
+    snapshot_id: Option<i64>,
+    include_simulation: bool,
+    include_upset_lab: bool,
+    include_raw_odds: bool,
+) -> Result<Value, String> {
     let conn = open_conn(&app)?;
     let matches = list_matches(app.clone()).await.unwrap_or_default();
     let analyses = list_match_analyses(app.clone()).await.unwrap_or_default();
@@ -8540,7 +9177,7 @@ async fn build_gpt_analysis_package(app: AppHandle, match_id: String) -> Result<
         .unwrap_or_default();
     let match_row = matches.iter().find(|item| item.id == match_id);
     let analysis = analyses.iter().find(|item| item.match_id == match_id);
-    let snapshot = pick_snapshot_for_match(&snapshots, &match_id);
+    let snapshot = pick_snapshot_for_match_with_id(&snapshots, &match_id, snapshot_id);
     let recs = recommendations
         .iter()
         .filter(|item| item.match_id == match_id)
@@ -8551,8 +9188,17 @@ async fn build_gpt_analysis_package(app: AppHandle, match_id: String) -> Result<
         .filter(|item| value_match_id(item) == match_id)
         .cloned()
         .collect::<Vec<_>>();
-    let markdown =
-        build_gpt_analysis_package_markdown(match_row, analysis, snapshot, &recs, &upset, &conn);
+    let markdown = build_gpt_analysis_package_markdown(
+        match_row,
+        analysis,
+        snapshot,
+        &recs,
+        &upset,
+        &conn,
+        include_simulation,
+        include_upset_lab,
+        include_raw_odds,
+    );
     Ok(json!({
         "match_id": match_id,
         "markdown": markdown,
@@ -8566,7 +9212,35 @@ async fn build_gpt_analysis_package(app: AppHandle, match_id: String) -> Result<
 
 #[tauri::command]
 async fn gpt_analysis_package(app: AppHandle, match_id: String) -> Result<Value, String> {
-    build_gpt_analysis_package(app, match_id).await
+    build_gpt_analysis_package(app, match_id, None, true, true, true).await
+}
+
+#[tauri::command]
+async fn build_gpt_match_package_text(
+    app: AppHandle,
+    match_id: String,
+    snapshot_id: Option<i64>,
+) -> Result<String, String> {
+    let package = build_gpt_analysis_package(app, match_id, snapshot_id, true, true, true).await?;
+    Ok(package
+        .get("markdown")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string())
+}
+
+#[tauri::command]
+async fn copy_gpt_match_package(
+    app: AppHandle,
+    match_id: String,
+    snapshot_id: Option<i64>,
+) -> Result<Value, String> {
+    let markdown = build_gpt_match_package_text(app, match_id, snapshot_id).await?;
+    Ok(json!({
+        "success": true,
+        "markdown": markdown,
+        "message": "已生成 GPT 分析包，可复制到剪贴板。"
+    }))
 }
 
 #[tauri::command]
@@ -8579,7 +9253,9 @@ async fn gpt_today_analysis_packages(app: AppHandle) -> Result<Value, String> {
     let mut packages = Vec::new();
     let mut markdowns = Vec::new();
     for item in open_matches {
-        let package = build_gpt_analysis_package(app.clone(), item.id.clone()).await?;
+        let package =
+            build_gpt_analysis_package(app.clone(), item.id.clone(), None, true, true, true)
+                .await?;
         if let Some(markdown) = package.get("markdown").and_then(Value::as_str) {
             markdowns.push(markdown.to_string());
         }
@@ -8607,6 +9283,208 @@ async fn export_gpt_today_analysis_markdown(app: AppHandle) -> Result<Value, Str
         }));
     }
     write_export_text(&app, "gpt_today_analysis_package", "md", markdown)
+}
+
+fn gpt_file_label_for_match(
+    match_row: Option<&MatchRow>,
+    analysis: Option<&MatchAnalysis>,
+    snapshot: Option<&PreMatchSnapshotRow>,
+) -> (String, String) {
+    let kickoff = match_row
+        .map(|item| item.time.as_str())
+        .or_else(|| analysis.map(|item| item.match_time.as_str()))
+        .or_else(|| snapshot.map(|item| item.kickoff_time.as_str()))
+        .unwrap_or("");
+    let date = package_date_from_time(kickoff);
+    let label = match_row
+        .map(|item| match_label_from_parts(&item.home, &item.away))
+        .or_else(|| analysis.map(|item| item.match_label.clone()))
+        .or_else(|| snapshot.map(|item| match_label_from_parts(&item.home_team, &item.away_team)))
+        .unwrap_or_else(|| "未知比赛".to_string());
+    (
+        date,
+        sanitize_file_component(&label.replace(" vs ", "_vs_")),
+    )
+}
+
+#[tauri::command]
+async fn export_gpt_match_package(
+    app: AppHandle,
+    request: ExportGptMatchPackageRequest,
+) -> Result<Value, String> {
+    let conn = open_conn(&app)?;
+    let matches = list_matches(app.clone()).await.unwrap_or_default();
+    let analyses = list_match_analyses(app.clone()).await.unwrap_or_default();
+    let snapshots = load_pre_match_snapshots(app.clone())
+        .await
+        .unwrap_or_default();
+    let match_row = matches.iter().find(|item| item.id == request.match_id);
+    let analysis = analyses
+        .iter()
+        .find(|item| item.match_id == request.match_id);
+    let snapshot =
+        pick_snapshot_for_match_with_id(&snapshots, &request.match_id, request.snapshot_id);
+    let package = build_gpt_analysis_package(
+        app.clone(),
+        request.match_id.clone(),
+        request.snapshot_id,
+        request.include_simulation.unwrap_or(true),
+        request.include_upset_lab.unwrap_or(true),
+        request.include_raw_odds.unwrap_or(true),
+    )
+    .await?;
+    let markdown = package
+        .get("markdown")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let (date, label) = gpt_file_label_for_match(match_row, analysis, snapshot);
+    let dir = gpt_exports_dir(&app)?;
+    let path = unique_markdown_path(&dir, &format!("GPT赛前分析包_{}_{}", date, label));
+    fs::write(&path, markdown).map_err(|error| error.to_string())?;
+    let mut warnings = Vec::new();
+    if !package
+        .get("has_snapshot")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        warnings.push("非冻结快照，建议临场前生成 final snapshot。".to_string());
+    }
+    if !package
+        .get("has_odds")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        warnings.push("赔率缺失，不能计算 EV。".to_string());
+    }
+    if odds_snapshot_batches(&conn, &request.match_id) < 2 {
+        warnings.push("快照不足，无法判断变化。".to_string());
+    }
+    Ok(json!({
+        "success": true,
+        "file_path": path.to_string_lossy().to_string(),
+        "file_name": path.file_name().and_then(|name| name.to_str()).unwrap_or("").to_string(),
+        "warnings": warnings
+    }))
+}
+
+#[tauri::command]
+async fn export_gpt_today_packages(
+    app: AppHandle,
+    request: ExportGptTodayPackagesRequest,
+) -> Result<Value, String> {
+    let matches = list_matches(app.clone()).await.unwrap_or_default();
+    let date = request
+        .date
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| Utc::now().format("%Y-%m-%d").to_string());
+    let open_matches = matches
+        .into_iter()
+        .filter(|item| !match_time_is_past(&item.time))
+        .filter(|item| {
+            request
+                .date
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .map(|date| item.time.starts_with(date))
+                .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
+    if open_matches.is_empty() {
+        return Ok(json!({
+            "success": false,
+            "export_dir": gpt_exports_dir(&app)?.to_string_lossy().to_string(),
+            "files": [],
+            "match_count": 0,
+            "warnings": ["今日比赛为空，请先同步比赛。"]
+        }));
+    }
+    let dir = gpt_exports_dir(&app)?;
+    let mut files = Vec::new();
+    let mut warnings = Vec::new();
+    let split_files = request.split_files.unwrap_or(false);
+    if split_files {
+        for item in &open_matches {
+            let result = export_gpt_match_package(
+                app.clone(),
+                ExportGptMatchPackageRequest {
+                    match_id: item.id.clone(),
+                    snapshot_id: None,
+                    include_simulation: request.include_simulation,
+                    include_upset_lab: request.include_upset_lab,
+                    include_raw_odds: request.include_raw_odds,
+                },
+            )
+            .await?;
+            if let Some(path) = result.get("file_path").and_then(Value::as_str) {
+                files.push(path.to_string());
+            }
+            if let Some(items) = result.get("warnings").and_then(Value::as_array) {
+                warnings.extend(
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(|value| format!("{}：{}", item.match_num, value)),
+                );
+            }
+        }
+    } else {
+        let mut markdowns = Vec::new();
+        for item in &open_matches {
+            let package = build_gpt_analysis_package(
+                app.clone(),
+                item.id.clone(),
+                None,
+                request.include_simulation.unwrap_or(true),
+                request.include_upset_lab.unwrap_or(true),
+                request.include_raw_odds.unwrap_or(true),
+            )
+            .await?;
+            if !package
+                .get("has_snapshot")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                warnings.push(format!(
+                    "{} 非冻结快照，建议临场前生成 final snapshot。",
+                    item.match_num
+                ));
+            }
+            if !package
+                .get("has_odds")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                warnings.push(format!("{} 赔率缺失，不能计算 EV。", item.match_num));
+            }
+            if let Some(markdown) = package.get("markdown").and_then(Value::as_str) {
+                markdowns.push(markdown.to_string());
+            }
+        }
+        let path = unique_markdown_path(&dir, &format!("GPT赛前分析包_{}_全部比赛", date));
+        fs::write(&path, markdowns.join("\n\n---\n\n")).map_err(|error| error.to_string())?;
+        files.push(path.to_string_lossy().to_string());
+    }
+    Ok(json!({
+        "success": true,
+        "export_dir": dir.to_string_lossy().to_string(),
+        "files": files,
+        "match_count": open_matches.len(),
+        "warnings": warnings
+    }))
+}
+
+#[tauri::command]
+async fn open_gpt_exports_dir(app: AppHandle) -> Result<Value, String> {
+    let dir = gpt_exports_dir(&app)?;
+    Command::new("explorer")
+        .arg(&dir)
+        .spawn()
+        .map_err(|error| format!("打开 GPT 分析包目录失败：{}", error))?;
+    Ok(json!({
+        "success": true,
+        "export_dir": dir.to_string_lossy().to_string()
+    }))
 }
 
 #[tauri::command]
@@ -12458,8 +13336,13 @@ pub fn run_app() {
             get_live_paper_trading_summary,
             get_live_paper_trading_records,
             gpt_analysis_package,
+            build_gpt_match_package_text,
+            copy_gpt_match_package,
             gpt_today_analysis_packages,
             export_gpt_today_analysis_markdown,
+            export_gpt_match_package,
+            export_gpt_today_packages,
+            open_gpt_exports_dir,
             save_manual_analysis_note,
             get_manual_analysis_notes,
             manual_analysis_review_comparison,
@@ -14656,12 +15539,45 @@ mod tests {
             &[],
             &[],
             &conn,
+            true,
+            true,
+            true,
         );
         assert!(markdown.contains("赔率缺失，不能计算 EV"));
         assert!(markdown.contains("无赛前快照"));
         assert!(markdown.contains("请你作为赛前分析师"));
+        assert!(markdown.contains("## 4. 模拟比赛信息"));
+        assert!(markdown.contains("模拟比分 Top10"));
+        assert!(markdown.contains("请区分“赛果倾向”和“投注价值”"));
         assert!(!markdown.to_lowercase().contains("api_key"));
         assert!(!markdown.contains("secret-plain-key"));
+    }
+
+    #[test]
+    fn gpt_export_filename_sanitizes_windows_illegal_chars() {
+        let sanitized = sanitize_file_component("英格兰:主场/刚果金?*  vs  test");
+        assert!(!sanitized.contains(':'));
+        assert!(!sanitized.contains('/'));
+        assert!(!sanitized.contains('?'));
+        assert!(!sanitized.contains('*'));
+        assert!(sanitized.contains("英格兰"));
+    }
+
+    #[test]
+    fn gpt_unique_markdown_path_uses_desktop_package_name_shape() {
+        let root = std::env::temp_dir().join(format!(
+            "gpt-export-path-test-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = unique_markdown_path(&root, "GPT赛前分析包_2026-07-02_英格兰_vs_刚果金");
+        assert!(path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("")
+            .ends_with(".md"));
+        assert!(path.to_string_lossy().contains("GPT赛前分析包"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -14676,8 +15592,10 @@ mod tests {
     #[test]
     fn frontend_copy_buttons_are_declared_without_certain_profit_words() {
         let frontend = include_str!("../../../src/legacyMain.js");
-        assert!(frontend.contains("copy-gpt-package"));
-        assert!(frontend.contains("export-today-gpt-packages"));
+        assert!(frontend.contains("copy-gpt-match-package"));
+        assert!(frontend.contains("export-gpt-match-package"));
+        assert!(frontend.contains("export-gpt-today-packages"));
+        assert!(frontend.contains("open-gpt-exports-dir"));
         assert!(frontend.contains("save-manual-analysis"));
         assert!(!frontend.contains("稳赚"));
         assert!(!frontend.contains("必买"));
