@@ -4137,7 +4137,12 @@ async fn list_recommendations(app: AppHandle) -> Result<Vec<Recommendation>, Str
     let player_status_value = player_status_cache.as_ref().map(|record| &record.value);
     let result_rows = model_result_rows(&conn);
     let settings = load_model_settings(&conn);
-    let matches = list_matches(app.clone()).await.unwrap_or_default();
+    let all_matches = list_matches(app.clone()).await.unwrap_or_default();
+    let matches = all_matches
+        .iter()
+        .filter(|item| match_is_open_for_recommendation(&item.id, &item.time, &all_matches))
+        .cloned()
+        .collect::<Vec<_>>();
     let selections = sporttery_selections(&sporttery.value);
     let mut grouped: BTreeMap<String, Vec<OddsSelection>> = BTreeMap::new();
     for selection in selections {
@@ -6854,6 +6859,14 @@ fn snapshot_is_open_for_recommendation(
     match_is_open_for_recommendation(&snapshot.match_id, &snapshot.kickoff_time, matches)
 }
 
+fn candidate_value_is_open_for_recommendation(candidate: &Value) -> bool {
+    let match_time = candidate
+        .get("match_time")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    !match_time_is_past(match_time)
+}
+
 fn kickoff_is_future(kickoff_time: &str, snapshot_time: &str) -> bool {
     match (
         parse_time_as_utc(kickoff_time),
@@ -6932,7 +6945,12 @@ fn snapshot_mapping_error(error: rusqlite::Error) -> String {
 #[tauri::command]
 async fn create_pre_match_snapshot(app: AppHandle, match_id: String) -> Result<Value, String> {
     let recommendations = list_recommendations(app.clone()).await.unwrap_or_default();
-    let matches = list_matches(app.clone()).await.unwrap_or_default();
+    let all_matches = list_matches(app.clone()).await.unwrap_or_default();
+    let matches = all_matches
+        .iter()
+        .filter(|item| match_is_open_for_recommendation(&item.id, &item.time, &all_matches))
+        .cloned()
+        .collect::<Vec<_>>();
     let target_match = matches.iter().find(|item| item.id == match_id).cloned();
     let target_teams = target_match
         .as_ref()
@@ -7172,7 +7190,12 @@ async fn create_pre_match_snapshot(app: AppHandle, match_id: String) -> Result<V
 
 #[tauri::command]
 async fn create_today_pre_match_snapshots(app: AppHandle) -> Result<Value, String> {
-    let matches = list_matches(app.clone()).await?;
+    let all_matches = list_matches(app.clone()).await?;
+    let matches = all_matches
+        .iter()
+        .filter(|item| match_is_open_for_recommendation(&item.id, &item.time, &all_matches))
+        .cloned()
+        .collect::<Vec<_>>();
     if matches.is_empty() {
         return Err("今日比赛为空，请先同步比赛。".to_string());
     }
@@ -10575,7 +10598,12 @@ async fn generate_upset_lab_candidates(app: AppHandle) -> Result<Value, String> 
         return Ok(json!({ "ok": false, "created": 0, "message": "冷门实验室未启用" }));
     }
     cache_put(&conn, "upset_lab_settings", &settings).map_err(|error| error.to_string())?;
-    let matches = list_matches(app.clone()).await.unwrap_or_default();
+    let all_matches = list_matches(app.clone()).await.unwrap_or_default();
+    let matches = all_matches
+        .iter()
+        .filter(|item| match_is_open_for_recommendation(&item.id, &item.time, &all_matches))
+        .cloned()
+        .collect::<Vec<_>>();
     let now = Utc::now().to_rfc3339();
     conn.execute(
         "delete from upset_lab_candidates
@@ -10706,6 +10734,10 @@ async fn generate_upset_lab_candidates(app: AppHandle) -> Result<Value, String> 
     let mut light_scan_preview = Vec::new();
 
     for snapshot in preferred.values() {
+        if !snapshot_is_open_for_recommendation(snapshot, &all_matches) {
+            skipped += 1;
+            continue;
+        }
         let source_snapshot_type = if snapshot.is_final_pre_match {
             "live_pre_match"
         } else {
@@ -10981,6 +11013,7 @@ async fn get_upset_lab_candidates(
     let mut items = rows
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
+    items.retain(candidate_value_is_open_for_recommendation);
     if let Some(date) = date.filter(|value| !value.trim().is_empty()) {
         items.retain(|item| {
             item.get("match_time")
@@ -11174,7 +11207,13 @@ async fn create_upset_lab_paper_trades(app: AppHandle) -> Result<Value, String> 
     let mut skipped = 0;
     let mut skipped_missing_odds = 0;
     let mut skipped_scan_only = 0;
+    let mut skipped_expired = 0;
     for candidate in candidates {
+        if !candidate_value_is_open_for_recommendation(&candidate) {
+            skipped += 1;
+            skipped_expired += 1;
+            continue;
+        }
         if let Some(reason) = upset_lab_paper_trade_skip_reason(&candidate) {
             skipped += 1;
             if reason == "missing_odds" {
@@ -11260,6 +11299,7 @@ async fn create_upset_lab_paper_trades(app: AppHandle) -> Result<Value, String> 
         "skipped": skipped,
         "skipped_missing_odds": skipped_missing_odds,
         "skipped_scan_only": skipped_scan_only,
+        "skipped_expired": skipped_expired,
         "message": "冷门实验室纸面交易已创建；不影响正式推荐。"
     }))
 }
@@ -12024,6 +12064,22 @@ mod tests {
             settlement: None,
         };
         assert!(!snapshot_is_open_for_recommendation(&snapshot, &[]));
+    }
+
+    #[test]
+    fn expired_candidate_value_is_not_open_for_trade_or_display() {
+        let expired = json!({
+            "match_id": "m-expired",
+            "match_time": "2026-06-30T04:30:00Z",
+            "final_lab_decision": "tiny_stake_candidate"
+        });
+        let future = json!({
+            "match_id": "m-future",
+            "match_time": "2099-06-30T04:30:00Z",
+            "final_lab_decision": "tiny_stake_candidate"
+        });
+        assert!(!candidate_value_is_open_for_recommendation(&expired));
+        assert!(candidate_value_is_open_for_recommendation(&future));
     }
 
     #[test]
