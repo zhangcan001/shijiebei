@@ -31,14 +31,17 @@ use crate::services::source_service::{
 };
 use anyhow::Context;
 use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, NaiveDateTime, Utc};
-use rand::Rng;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use rusqlite::types::ValueRef;
 use rusqlite::{params, Connection};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::BTreeMap;
 use std::fs;
 use std::future::Future;
+use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -8210,6 +8213,26 @@ struct OneClickGptPackagePipelineRequest {
     auto_final_snapshot: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MonteCarloSimulationRequest {
+    match_id: String,
+    snapshot_id: Option<i64>,
+    iterations: Option<u32>,
+    seed: Option<u64>,
+    use_market_calibration: Option<bool>,
+    use_knockout_adjustment: Option<bool>,
+    use_lineup_adjustment: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TodayMonteCarloSimulationRequest {
+    date: Option<String>,
+    iterations: Option<u32>,
+    overwrite: Option<bool>,
+}
+
 fn compact_json_text(value: &Value) -> String {
     if value.is_null() {
         "-".to_string()
@@ -9222,7 +9245,12 @@ fn simulation_markdown_from_analysis(analysis: Option<&MatchAnalysis>) -> (Strin
         format!(
             r#"### 模拟对决摘要
 
-* 模拟次数：轻量矩阵 9x9（基于 λ 和 Dixon-Coles 修正）
+* 模拟次数：50000次模拟失败，使用轻量 fallback
+* 模拟版本：light_fallback_v1
+* 随机种子：-
+* 是否 fallback：是
+* fallback 说明：未读取到 match_simulation_results 中的 Monte Carlo 缓存，本段由 λ 比分矩阵快速估算。
+* 样本误差提示：50000次模拟仍存在随机误差，结果仅作概率参考；当前 fallback 未进行随机采样。
 * 主队平均进球：{lh:.2}
 * 客队平均进球：{la:.2}
 * 主胜概率：{hw:.2}%
@@ -9277,6 +9305,233 @@ fn simulation_markdown_from_analysis(analysis: Option<&MatchAnalysis>) -> (Strin
                 .join("\n"),
         ),
         true,
+    )
+}
+
+fn pct_from_value(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{:.2}%", value * 100.0))
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn simulation_markdown_from_cached_result(result: &Value) -> String {
+    let summary = result.get("summary").unwrap_or(&Value::Null);
+    let score_rows = result
+        .get("score_distribution")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .take(10)
+                .map(|item| {
+                    format!(
+                        "| {} | {} | {} |",
+                        item.get("score").and_then(Value::as_str).unwrap_or("-"),
+                        item.get("count").and_then(Value::as_u64).unwrap_or(0),
+                        pct_from_value(item.get("probability").and_then(Value::as_f64))
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or_else(|| "| - | 0 | - |".to_string());
+    let total_rows = result
+        .get("total_goals_distribution")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    format!(
+                        "| {} | {} | {} |",
+                        item.get("label").and_then(Value::as_str).unwrap_or("-"),
+                        item.get("count").and_then(Value::as_u64).unwrap_or(0),
+                        pct_from_value(item.get("probability").and_then(Value::as_f64))
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or_else(|| "| - | 0 | - |".to_string());
+    let warnings = result
+        .get("warnings")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|text| format!("* {}", text))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or_else(|| "* -".to_string());
+    format!(
+        r#"### 模拟对决摘要
+
+* 模拟次数：{iterations}次 Monte Carlo
+* 模拟方式：50000次 Monte Carlo 模拟（基于 λ、Dixon-Coles 修正、市场校准、淘汰赛修正）
+* 模拟版本：{version}
+* 随机种子：{seed}
+* 是否 fallback：{fallback}
+* home_lambda：{home_lambda:.2}
+* away_lambda：{away_lambda:.2}
+* adjusted_home_lambda：{adjusted_home_lambda:.2}
+* adjusted_away_lambda：{adjusted_away_lambda:.2}
+* 最近模拟时间：{updated_at}
+* 样本误差提示：50000次模拟仍存在随机误差，结果仅作概率参考。
+* 主队平均进球：{home_avg:.2}
+* 客队平均进球：{away_avg:.2}
+* 主胜概率：{home_win}
+* 平局概率：{draw}
+* 客胜概率：{away_win}
+* 主队赢 1 球概率：{home_win_1}
+* 主队赢 2 球以上概率：{home_win_2plus}
+* 客队不败概率：{away_not_lose}
+* 双方进球 BTTS 概率：{btts}
+* 大于 2.5 球概率：{over}
+* 小于 2.5 球概率：{under}
+* 0-1球概率：{low}
+* 2-3球概率：{mid}
+* 4球以上概率：{high}
+* 主队零封概率：{clean_home}
+* 客队零封概率：{clean_away}
+* 最常见比分：{most_common}
+* 爆冷概率：{upset}
+* 热门穿盘概率：{favorite_cover}
+* 热门不穿盘概率：{favorite_fail}
+
+### 模拟比分 Top10
+
+| 比分 | 命中次数 | 模拟概率 |
+| -- | --: | ---: |
+{score_rows}
+
+### 模拟总进球分布
+
+| 总进球 | 命中次数 | 概率 |
+| --- | --: | -: |
+{total_rows}
+
+### 模拟警告
+
+{warnings}
+"#,
+        iterations = result
+            .get("iterations")
+            .and_then(Value::as_u64)
+            .unwrap_or(50_000),
+        version = result
+            .get("simulation_version")
+            .and_then(Value::as_str)
+            .unwrap_or("monte_carlo_v1"),
+        seed = result
+            .get("seed")
+            .map(compact_json_text)
+            .unwrap_or_else(|| "-".to_string()),
+        fallback = if summary
+            .get("simulation_fallback")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            "是"
+        } else {
+            "否"
+        },
+        home_lambda = result
+            .get("home_lambda")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
+        away_lambda = result
+            .get("away_lambda")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
+        adjusted_home_lambda = result
+            .get("adjusted_home_lambda")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
+        adjusted_away_lambda = result
+            .get("adjusted_away_lambda")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
+        updated_at = result
+            .get("updated_at")
+            .and_then(Value::as_str)
+            .unwrap_or("-"),
+        home_avg = summary
+            .get("home_avg_goals")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
+        away_avg = summary
+            .get("away_avg_goals")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
+        home_win = pct_from_value(summary.get("home_win_probability").and_then(Value::as_f64)),
+        draw = pct_from_value(summary.get("draw_probability").and_then(Value::as_f64)),
+        away_win = pct_from_value(summary.get("away_win_probability").and_then(Value::as_f64)),
+        home_win_1 = pct_from_value(
+            summary
+                .get("home_win_by_1_probability")
+                .and_then(Value::as_f64)
+        ),
+        home_win_2plus = pct_from_value(
+            summary
+                .get("home_win_by_2plus_probability")
+                .and_then(Value::as_f64)
+        ),
+        away_not_lose = pct_from_value(
+            summary
+                .get("away_not_lose_probability")
+                .and_then(Value::as_f64)
+        ),
+        btts = pct_from_value(summary.get("btts_probability").and_then(Value::as_f64)),
+        over = pct_from_value(summary.get("over_2_5_probability").and_then(Value::as_f64)),
+        under = pct_from_value(summary.get("under_2_5_probability").and_then(Value::as_f64)),
+        low = pct_from_value(
+            summary
+                .get("total_goals_0_1_probability")
+                .and_then(Value::as_f64)
+        ),
+        mid = pct_from_value(
+            summary
+                .get("total_goals_2_3_probability")
+                .and_then(Value::as_f64)
+        ),
+        high = pct_from_value(
+            summary
+                .get("total_goals_4plus_probability")
+                .and_then(Value::as_f64)
+        ),
+        clean_home = pct_from_value(
+            summary
+                .get("clean_sheet_home_probability")
+                .and_then(Value::as_f64)
+        ),
+        clean_away = pct_from_value(
+            summary
+                .get("clean_sheet_away_probability")
+                .and_then(Value::as_f64)
+        ),
+        most_common = summary
+            .get("most_common_score")
+            .and_then(Value::as_str)
+            .unwrap_or("-"),
+        upset = pct_from_value(summary.get("upset_probability").and_then(Value::as_f64)),
+        favorite_cover = pct_from_value(
+            summary
+                .get("favorite_cover_probability")
+                .and_then(Value::as_f64)
+        ),
+        favorite_fail = pct_from_value(
+            summary
+                .get("favorite_fail_to_cover_probability")
+                .and_then(Value::as_f64)
+        ),
+        score_rows = score_rows,
+        total_rows = total_rows,
+        warnings = warnings,
     )
 }
 
@@ -9388,6 +9643,577 @@ fn gpt_questions_markdown() -> &'static str {
 8. 请区分“赛果倾向”和“投注价值”。
 9. 如果软件数据有自相矛盾，请指出并降低置信度。
 10. 请给出最终分层建议：主方向 / 观察方向 / 回避方向 / 比分参考。"#
+}
+
+fn stable_simulation_seed(
+    match_id: &str,
+    snapshot_id: Option<i64>,
+    model_version: &str,
+    odds_snapshot_time: &str,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    match_id.hash(&mut hasher);
+    snapshot_id.unwrap_or(0).hash(&mut hasher);
+    model_version.hash(&mut hasher);
+    odds_snapshot_time.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn simulation_market_prob(recommendations: &[Recommendation], pick: &str) -> Option<f64> {
+    recommendations
+        .iter()
+        .find(|item| item.market.starts_with("HAD") && item.pick == pick && item.fair_prob > 0.0)
+        .map(|item| item.fair_prob)
+}
+
+fn normalize_threeway(mut probs: (f64, f64, f64)) -> Option<(f64, f64, f64)> {
+    let sum = probs.0 + probs.1 + probs.2;
+    if sum <= 0.0 || !sum.is_finite() {
+        return None;
+    }
+    probs.0 /= sum;
+    probs.1 /= sum;
+    probs.2 /= sum;
+    Some(probs)
+}
+
+fn run_monte_carlo_from_export_context(
+    conn: &Connection,
+    match_row: Option<&MatchRow>,
+    analysis: Option<&MatchAnalysis>,
+    snapshot: Option<&PreMatchSnapshotRow>,
+    recommendations: &[Recommendation],
+    iterations: u32,
+    seed: Option<u64>,
+    use_market_calibration: bool,
+    use_knockout_adjustment: bool,
+    use_lineup_adjustment: bool,
+) -> Result<Value, String> {
+    let iterations = iterations.clamp(50_000, 500_000);
+    let match_id = match_row
+        .map(|item| item.id.as_str())
+        .or_else(|| analysis.map(|item| item.match_id.as_str()))
+        .or_else(|| snapshot.map(|item| item.match_id.as_str()))
+        .unwrap_or("");
+    if match_id.trim().is_empty() {
+        return Err("缺少 match_id，无法运行模拟。".to_string());
+    }
+    let home = match_row
+        .map(|item| item.home.as_str())
+        .or_else(|| snapshot.map(|item| item.home_team.as_str()))
+        .or_else(|| analysis.and_then(|item| item.match_label.split(" vs ").next()))
+        .unwrap_or("");
+    let away = match_row
+        .map(|item| item.away.as_str())
+        .or_else(|| snapshot.map(|item| item.away_team.as_str()))
+        .or_else(|| {
+            analysis.and_then(|item| {
+                item.match_label
+                    .split(" vs ")
+                    .collect::<Vec<_>>()
+                    .get(1)
+                    .copied()
+            })
+        })
+        .unwrap_or("");
+    let mut warnings = Vec::<String>::new();
+    let simulation_fallback = analysis.is_none();
+    let (home_base, away_base, fallback_note) = if let Some(analysis) = analysis {
+        (
+            analysis.lambda_home.max(0.25),
+            analysis.lambda_away.max(0.25),
+            String::new(),
+        )
+    } else {
+        let (lh, la, note) = rank_lambdas(home, away);
+        warnings.push("缺少模型 λ，已使用排名/规则 fallback λ。".to_string());
+        (lh, la, note)
+    };
+    if !fallback_note.is_empty() {
+        warnings.push(fallback_note);
+    }
+    let mut adjusted_home = home_base;
+    let mut adjusted_away = away_base;
+    let raw_stage = match_row
+        .map(|item| item.status.as_str())
+        .or_else(|| snapshot.map(|item| item.stage.as_str()))
+        .unwrap_or("");
+    let kickoff = match_row
+        .map(|item| item.time.as_str())
+        .or_else(|| snapshot.map(|item| item.kickoff_time.as_str()))
+        .unwrap_or("");
+    let competition = snapshot
+        .map(|item| item.competition.as_str())
+        .or_else(|| match_row.map(|item| item.league.as_str()))
+        .unwrap_or("");
+    let (stage, _) = normalize_stage_for_export(raw_stage, kickoff, competition);
+    if use_knockout_adjustment && is_knockout_stage(&stage) {
+        let note = apply_knockout_tempo(home, away, &mut adjusted_home, &mut adjusted_away);
+        warnings.push(format!("淘汰赛修正：{}", note));
+    }
+    if use_lineup_adjustment {
+        let lineup_status = snapshot
+            .map(|item| item.lineup_status.as_str())
+            .unwrap_or("unknown");
+        if lineup_status.to_ascii_lowercase().contains("unknown") {
+            warnings.push("首发 unknown：不做强修正，仅提示人工复核。".to_string());
+        }
+        let injury_status = snapshot
+            .map(|item| item.injury_status.as_str())
+            .unwrap_or("unknown");
+        if injury_status.to_ascii_lowercase().contains("unknown") {
+            warnings.push("伤停 unknown：未做球员级 λ 修正。".to_string());
+        }
+    }
+    let mut matrix = score_distribution(adjusted_home, adjusted_away, 10);
+    normalize_score_probs(&mut matrix);
+    apply_dixon_coles(&mut matrix, adjusted_home, adjusted_away, -0.10);
+    if use_market_calibration {
+        if let Some(market_threeway) = normalize_threeway((
+            simulation_market_prob(recommendations, "主胜").unwrap_or(0.0),
+            simulation_market_prob(recommendations, "平局").unwrap_or(0.0),
+            simulation_market_prob(recommendations, "客胜").unwrap_or(0.0),
+        )) {
+            let model_threeway = threeway_from_scores(&matrix);
+            let target = normalize_threeway((
+                model_threeway.0 * 0.80 + market_threeway.0 * 0.20,
+                model_threeway.1 * 0.80 + market_threeway.1 * 0.20,
+                model_threeway.2 * 0.80 + market_threeway.2 * 0.20,
+            ))
+            .unwrap_or(model_threeway);
+            matrix = retarget_scores_to_threeway(&matrix, target);
+            warnings.push("市场校准：HAD 市场概率以 20% 权重轻度收缩。".to_string());
+        } else {
+            warnings.push("市场校准：缺少完整 HAD 市场概率，保持模型矩阵。".to_string());
+        }
+    }
+    let model_version = snapshot
+        .map(|item| item.model_version.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| analysis.map(|_| "rules-dixon-coles-v1"))
+        .unwrap_or("fallback-rank-lambda");
+    let odds_snapshot_time = conn
+        .query_row(
+            "select created_at from odds_snapshots where match_id=?1 order by id desc limit 1",
+            params![match_id],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| {
+            snapshot
+                .map(|item| item.snapshot_time.clone())
+                .unwrap_or_default()
+        });
+    let seed = seed.unwrap_or_else(|| {
+        stable_simulation_seed(
+            match_id,
+            snapshot.map(|item| item.id),
+            model_version,
+            &odds_snapshot_time,
+        )
+    });
+    let mut cumulative = Vec::with_capacity(matrix.len());
+    let mut running = 0.0;
+    for (_, _, p) in &matrix {
+        running += *p;
+        cumulative.push(running);
+    }
+    if let Some(last) = cumulative.last_mut() {
+        *last = 1.0;
+    }
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut home_goals_sum = 0u64;
+    let mut away_goals_sum = 0u64;
+    let mut home_win_count = 0u32;
+    let mut draw_count = 0u32;
+    let mut away_win_count = 0u32;
+    let mut home_win_by_1_count = 0u32;
+    let mut home_win_by_2plus_count = 0u32;
+    let mut btts_count = 0u32;
+    let mut over_25_count = 0u32;
+    let mut clean_sheet_home_count = 0u32;
+    let mut clean_sheet_away_count = 0u32;
+    let mut score_counts: BTreeMap<(u32, u32), u32> = BTreeMap::new();
+    let mut total_goal_counts = [0u32; 8];
+    let mut margin_counts = BTreeMap::<String, u32>::new();
+    for _ in 0..iterations {
+        let score_idx = draw_score_index(&cumulative, &mut rng);
+        let (h, a, _) = matrix[score_idx];
+        home_goals_sum += h as u64;
+        away_goals_sum += a as u64;
+        if h > a {
+            home_win_count += 1;
+            if h - a == 1 {
+                home_win_by_1_count += 1;
+                *margin_counts.entry("主胜1".to_string()).or_insert(0) += 1;
+            } else {
+                home_win_by_2plus_count += 1;
+                *margin_counts.entry("主胜2+".to_string()).or_insert(0) += 1;
+            }
+        } else if h == a {
+            draw_count += 1;
+            *margin_counts.entry("平".to_string()).or_insert(0) += 1;
+        } else if a - h == 1 {
+            away_win_count += 1;
+            *margin_counts.entry("客胜1".to_string()).or_insert(0) += 1;
+        } else {
+            away_win_count += 1;
+            *margin_counts.entry("客胜2+".to_string()).or_insert(0) += 1;
+        }
+        if h > 0 && a > 0 {
+            btts_count += 1;
+        }
+        if h + a >= 3 {
+            over_25_count += 1;
+        }
+        if a == 0 {
+            clean_sheet_home_count += 1;
+        }
+        if h == 0 {
+            clean_sheet_away_count += 1;
+        }
+        total_goal_counts[(h + a).min(7) as usize] += 1;
+        *score_counts.entry((h, a)).or_insert(0) += 1;
+    }
+    let denom = iterations as f64;
+    let mut score_distribution = score_counts
+        .iter()
+        .map(|((h, a), count)| {
+            json!({
+                "score": format!("{}:{}", h, a),
+                "count": count,
+                "probability": *count as f64 / denom
+            })
+        })
+        .collect::<Vec<_>>();
+    score_distribution.sort_by(|a, b| {
+        b.get("probability")
+            .and_then(Value::as_f64)
+            .partial_cmp(&a.get("probability").and_then(Value::as_f64))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let top_score_distribution = score_distribution.into_iter().take(10).collect::<Vec<_>>();
+    let total_goals_distribution = total_goal_counts
+        .iter()
+        .enumerate()
+        .map(|(idx, count)| {
+            json!({
+                "total_goals": if idx == 7 { "7+".to_string() } else { idx.to_string() },
+                "label": if idx == 7 { "7+球".to_string() } else { format!("{}球", idx) },
+                "count": count,
+                "probability": *count as f64 / denom
+            })
+        })
+        .collect::<Vec<_>>();
+    let margin_distribution = ["客胜2+", "客胜1", "平", "主胜1", "主胜2+"]
+        .iter()
+        .map(|label| {
+            let count = *margin_counts.get(*label).unwrap_or(&0);
+            json!({
+                "margin": label,
+                "count": count,
+                "probability": count as f64 / denom
+            })
+        })
+        .collect::<Vec<_>>();
+    let most_common_score = top_score_distribution
+        .first()
+        .and_then(|item| item.get("score"))
+        .and_then(Value::as_str)
+        .unwrap_or("-")
+        .to_string();
+    let home_win_probability = home_win_count as f64 / denom;
+    let draw_probability = draw_count as f64 / denom;
+    let away_win_probability = away_win_count as f64 / denom;
+    let favorite_is_home = home_win_probability >= away_win_probability;
+    let favorite_cover_probability = if favorite_is_home {
+        home_win_by_2plus_count as f64 / denom
+    } else {
+        margin_counts.get("客胜2+").copied().unwrap_or(0) as f64 / denom
+    };
+    let favorite_fail_to_cover_probability = 1.0 - favorite_cover_probability;
+    let upset_probability = if favorite_is_home {
+        (draw_count + away_win_count) as f64 / denom
+    } else {
+        (draw_count + home_win_count) as f64 / denom
+    };
+    let summary = json!({
+        "iterations": iterations,
+        "home_avg_goals": home_goals_sum as f64 / denom,
+        "away_avg_goals": away_goals_sum as f64 / denom,
+        "home_win_probability": home_win_probability,
+        "draw_probability": draw_probability,
+        "away_win_probability": away_win_probability,
+        "home_win_by_1_probability": home_win_by_1_count as f64 / denom,
+        "home_win_by_2plus_probability": home_win_by_2plus_count as f64 / denom,
+        "away_not_lose_probability": (draw_count + away_win_count) as f64 / denom,
+        "btts_probability": btts_count as f64 / denom,
+        "over_2_5_probability": over_25_count as f64 / denom,
+        "under_2_5_probability": 1.0 - over_25_count as f64 / denom,
+        "total_goals_0_1_probability": (total_goal_counts[0] + total_goal_counts[1]) as f64 / denom,
+        "total_goals_2_3_probability": (total_goal_counts[2] + total_goal_counts[3]) as f64 / denom,
+        "total_goals_4plus_probability": total_goal_counts[4..].iter().sum::<u32>() as f64 / denom,
+        "clean_sheet_home_probability": clean_sheet_home_count as f64 / denom,
+        "clean_sheet_away_probability": clean_sheet_away_count as f64 / denom,
+        "score_mode": most_common_score,
+        "most_common_score": most_common_score,
+        "upset_probability": upset_probability,
+        "favorite_cover_probability": favorite_cover_probability,
+        "favorite_fail_to_cover_probability": favorite_fail_to_cover_probability,
+        "simulation_fallback": simulation_fallback,
+        "sample_error_note": "50000次模拟仍存在随机误差，结果仅作概率参考。"
+    });
+    let now = Utc::now().to_rfc3339();
+    let snapshot_id = snapshot.map(|item| item.id).unwrap_or(0);
+    let warnings_json = json!(warnings);
+    conn.execute(
+        "insert into match_simulation_results(
+            match_id, snapshot_id, simulation_version, iterations, seed, home_lambda, away_lambda,
+            adjusted_home_lambda, adjusted_away_lambda, summary_json, score_distribution_json,
+            total_goals_distribution_json, margin_distribution_json, warnings_json, created_at, updated_at
+         ) values(?1, ?2, 'monte_carlo_v1', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)
+         on conflict(match_id, snapshot_id, simulation_version, iterations) do update set
+            seed=excluded.seed,
+            home_lambda=excluded.home_lambda,
+            away_lambda=excluded.away_lambda,
+            adjusted_home_lambda=excluded.adjusted_home_lambda,
+            adjusted_away_lambda=excluded.adjusted_away_lambda,
+            summary_json=excluded.summary_json,
+            score_distribution_json=excluded.score_distribution_json,
+            total_goals_distribution_json=excluded.total_goals_distribution_json,
+            margin_distribution_json=excluded.margin_distribution_json,
+            warnings_json=excluded.warnings_json,
+            updated_at=excluded.updated_at",
+        params![
+            match_id,
+            snapshot_id,
+            iterations as i64,
+            seed.to_string(),
+            home_base,
+            away_base,
+            adjusted_home,
+            adjusted_away,
+            summary.to_string(),
+            Value::Array(top_score_distribution.clone()).to_string(),
+            Value::Array(total_goals_distribution.clone()).to_string(),
+            Value::Array(margin_distribution.clone()).to_string(),
+            warnings_json.to_string(),
+            now
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(json!({
+        "match_id": match_id,
+        "snapshot_id": snapshot_id,
+        "iterations": iterations,
+        "seed": seed,
+        "home_lambda": home_base,
+        "away_lambda": away_base,
+        "adjusted_home_lambda": adjusted_home,
+        "adjusted_away_lambda": adjusted_away,
+        "simulation_version": "monte_carlo_v1",
+        "summary": summary,
+        "score_distribution": top_score_distribution,
+        "total_goals_distribution": total_goals_distribution,
+        "margin_distribution": margin_distribution,
+        "warnings": warnings_json,
+        "created_at": now,
+        "updated_at": now
+    }))
+}
+
+fn load_match_simulation_result(
+    conn: &Connection,
+    match_id: &str,
+    snapshot_id: Option<i64>,
+    iterations: u32,
+) -> Option<Value> {
+    let requested_snapshot_id = snapshot_id.unwrap_or(0);
+    let snapshot_candidates = if requested_snapshot_id == 0 {
+        vec![0]
+    } else {
+        vec![requested_snapshot_id, 0]
+    };
+    for snapshot_id in snapshot_candidates {
+        if let Some(value) = conn
+            .query_row(
+                "select seed, home_lambda, away_lambda, adjusted_home_lambda, adjusted_away_lambda,
+                        summary_json, score_distribution_json, total_goals_distribution_json,
+                        margin_distribution_json, warnings_json, created_at, updated_at
+                 from match_simulation_results
+                 where match_id=?1 and snapshot_id=?2 and simulation_version='monte_carlo_v1' and iterations=?3
+                 order by id desc limit 1",
+                params![match_id, snapshot_id, iterations as i64],
+                |row| {
+                    let seed_text: String = row.get(0)?;
+                    let summary_text: String = row.get(5)?;
+                    let score_text: String = row.get(6)?;
+                    let total_text: String = row.get(7)?;
+                    let margin_text: String = row.get(8)?;
+                    let warnings_text: String = row.get(9)?;
+                    Ok(json!({
+                        "match_id": match_id,
+                        "snapshot_id": snapshot_id,
+                        "iterations": iterations,
+                        "seed": seed_text.parse::<u64>().unwrap_or(0),
+                        "home_lambda": row.get::<_, f64>(1)?,
+                        "away_lambda": row.get::<_, f64>(2)?,
+                        "adjusted_home_lambda": row.get::<_, f64>(3)?,
+                        "adjusted_away_lambda": row.get::<_, f64>(4)?,
+                        "simulation_version": "monte_carlo_v1",
+                        "summary": serde_json::from_str::<Value>(&summary_text).unwrap_or_else(|_| json!({})),
+                        "score_distribution": serde_json::from_str::<Value>(&score_text).unwrap_or_else(|_| json!([])),
+                        "total_goals_distribution": serde_json::from_str::<Value>(&total_text).unwrap_or_else(|_| json!([])),
+                        "margin_distribution": serde_json::from_str::<Value>(&margin_text).unwrap_or_else(|_| json!([])),
+                        "warnings": serde_json::from_str::<Value>(&warnings_text).unwrap_or_else(|_| json!([])),
+                        "created_at": row.get::<_, String>(10)?,
+                        "updated_at": row.get::<_, String>(11)?
+                    }))
+                },
+            )
+            .ok()
+        {
+            return Some(value);
+        }
+    }
+    None
+}
+
+#[tauri::command]
+async fn run_match_monte_carlo_simulation(
+    app: AppHandle,
+    request: MonteCarloSimulationRequest,
+) -> Result<Value, String> {
+    let conn = open_conn(&app)?;
+    let matches = list_matches(app.clone()).await.unwrap_or_default();
+    let analyses = list_match_analyses(app.clone()).await.unwrap_or_default();
+    let recommendations = list_recommendations(app.clone()).await.unwrap_or_default();
+    let snapshots = load_pre_match_snapshots(app.clone())
+        .await
+        .unwrap_or_default();
+    let (resolved_match_id, _, _) = best_export_match_id_for(
+        &request.match_id,
+        &matches,
+        &snapshots,
+        &analyses,
+        &recommendations,
+    );
+    let match_row = matches.iter().find(|item| item.id == resolved_match_id);
+    let analysis = analyses
+        .iter()
+        .find(|item| item.match_id == resolved_match_id);
+    let snapshot =
+        pick_snapshot_for_match_with_id(&snapshots, &resolved_match_id, request.snapshot_id);
+    let recs = recommendations
+        .iter()
+        .filter(|item| item.match_id == resolved_match_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    run_monte_carlo_from_export_context(
+        &conn,
+        match_row,
+        analysis,
+        snapshot,
+        &recs,
+        request.iterations.unwrap_or(50_000),
+        request.seed,
+        request.use_market_calibration.unwrap_or(true),
+        request.use_knockout_adjustment.unwrap_or(true),
+        request.use_lineup_adjustment.unwrap_or(true),
+    )
+}
+
+#[tauri::command]
+async fn get_match_simulation_result(
+    app: AppHandle,
+    match_id: String,
+    snapshot_id: Option<i64>,
+) -> Result<Value, String> {
+    let conn = open_conn(&app)?;
+    load_match_simulation_result(&conn, &match_id, snapshot_id, 50_000)
+        .ok_or_else(|| "暂无 50000 次 Monte Carlo 模拟缓存。".to_string())
+}
+
+#[tauri::command]
+async fn run_today_monte_carlo_simulations(
+    app: AppHandle,
+    request: TodayMonteCarloSimulationRequest,
+) -> Result<Value, String> {
+    let conn = open_conn(&app)?;
+    let matches = list_matches(app.clone()).await.unwrap_or_default();
+    let snapshots = load_pre_match_snapshots(app.clone())
+        .await
+        .unwrap_or_default();
+    let analyses = list_match_analyses(app.clone()).await.unwrap_or_default();
+    let recommendations = list_recommendations(app.clone()).await.unwrap_or_default();
+    let date_filter = request.date.unwrap_or_default();
+    let open_matches = matches
+        .into_iter()
+        .filter(|item| !match_time_is_past(&item.time))
+        .filter(|item| date_filter.is_empty() || item.time.starts_with(&date_filter))
+        .collect::<Vec<_>>();
+    let deduped =
+        dedupe_matches_for_gpt_export(open_matches, &snapshots, &analyses, &recommendations);
+    let iterations = request.iterations.unwrap_or(50_000);
+    let overwrite = request.overwrite.unwrap_or(true);
+    let started = Instant::now();
+    let mut results = Vec::new();
+    for item in deduped {
+        let snapshot = pick_snapshot_for_match(&snapshots, &item.id);
+        if !overwrite
+            && load_match_simulation_result(&conn, &item.id, snapshot.map(|row| row.id), iterations)
+                .is_some()
+        {
+            results.push(json!({
+                "match_id": item.id,
+                "status": "skipped",
+                "message": "已有模拟缓存"
+            }));
+            continue;
+        }
+        let analysis = analyses.iter().find(|row| row.match_id == item.id);
+        let recs = recommendations
+            .iter()
+            .filter(|row| row.match_id == item.id)
+            .cloned()
+            .collect::<Vec<_>>();
+        match run_monte_carlo_from_export_context(
+            &conn,
+            Some(&item),
+            analysis,
+            snapshot,
+            &recs,
+            iterations,
+            None,
+            true,
+            true,
+            true,
+        ) {
+            Ok(value) => results.push(json!({
+                "match_id": item.id,
+                "status": "success",
+                "iterations": iterations,
+                "seed": value.get("seed").cloned().unwrap_or(Value::Null)
+            })),
+            Err(error) => results.push(json!({
+                "match_id": item.id,
+                "status": "failed",
+                "error": error
+            })),
+        }
+    }
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let failed_count = results
+        .iter()
+        .filter(|item| item.get("status").and_then(Value::as_str) == Some("failed"))
+        .count();
+    Ok(json!({
+        "success": failed_count == 0,
+        "simulation_version": "monte_carlo_v1",
+        "iterations": iterations,
+        "elapsed_ms": elapsed_ms,
+        "warning": if elapsed_ms > 20_000 { "今日 Monte Carlo 模拟超过20秒，请检查性能。" } else { "" },
+        "results": results
+    }))
 }
 
 fn build_gpt_analysis_package_markdown(
@@ -9514,8 +10340,14 @@ fn build_gpt_analysis_package_markdown(
             )
         })
         .unwrap_or_else(|| "无正式推荐，仅做模型参考。".to_string());
-    let (simulation_markdown, _has_simulation) = if include_simulation {
-        simulation_markdown_from_analysis(analysis)
+    let cached_simulation =
+        load_match_simulation_result(conn, match_id, snapshot.map(|item| item.id), 50_000);
+    let (simulation_markdown, has_simulation) = if include_simulation {
+        if let Some(result) = cached_simulation.as_ref() {
+            (simulation_markdown_from_cached_result(result), true)
+        } else {
+            simulation_markdown_from_analysis(analysis)
+        }
     } else {
         ("本次导出未包含模拟比赛信息。".to_string(), false)
     };
@@ -9863,7 +10695,7 @@ fn build_gpt_analysis_package_markdown(
         odds_missing_items = odds_missing_items,
         odds_quality_warning = odds_completeness_report.warning,
         model_completeness = if model_complete { "完整" } else { "缺失" },
-        simulation_status = if analysis.is_some() { "有" } else { "无" },
+        simulation_status = if has_simulation { "有" } else { "无" },
         stage_status = if stage_is_normal {
             "正常"
         } else {
@@ -9944,6 +10776,8 @@ async fn build_gpt_analysis_package(
         .collect::<Vec<_>>();
     let odds_completeness_report =
         classify_odds_completeness(&recs, analysis, snapshot_has_odds(snapshot));
+    let cached_simulation =
+        load_match_simulation_result(&conn, &match_id, snapshot.map(|item| item.id), 50_000);
     let markdown = build_gpt_analysis_package_markdown(
         match_row,
         analysis,
@@ -9984,7 +10818,8 @@ async fn build_gpt_analysis_package(
         "odds_completeness_label": odds_completeness_report.status_label,
         "odds_missing_items": odds_completeness_report.missing_items,
         "has_model_probs": analysis.is_some() || snapshot_has_model_probs(snapshot),
-        "has_simulation": analysis.map(|item| item.lambda_home > 0.0 && item.lambda_away > 0.0).unwrap_or(false),
+        "has_simulation": cached_simulation.is_some() || analysis.map(|item| item.lambda_home > 0.0 && item.lambda_away > 0.0).unwrap_or(false),
+        "simulation_version": if cached_simulation.is_some() { "monte_carlo_v1" } else { "light_fallback_v1" },
         "data_quality": snapshot.map(|item| item.data_quality_score).unwrap_or_else(|| recs.first().map(|item| item.data_score).unwrap_or(0.0)),
         "odds_snapshot_count": odds_snapshot_count_for_match(&conn, &match_id),
         "warning": if snapshot.is_none() { "无赛前快照，已导出非冻结基础分析包。" } else { "" }
@@ -10911,18 +11746,47 @@ async fn run_one_click_gpt_package_pipeline(
             &mut errors,
             false,
             || async {
-                let analyses = list_match_analyses(app.clone()).await.unwrap_or_default();
-                let with_sim = analyses
-                    .iter()
-                    .filter(|item| !item.scores.is_empty())
-                    .count();
+                let result = run_today_monte_carlo_simulations(
+                    app.clone(),
+                    TodayMonteCarloSimulationRequest {
+                        date: request.date.clone(),
+                        iterations: Some(50_000),
+                        overwrite: Some(true),
+                    },
+                )
+                .await?;
+                let success_count = result
+                    .get("results")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter(|item| {
+                                item.get("status").and_then(Value::as_str) == Some("success")
+                            })
+                            .count()
+                    })
+                    .unwrap_or(0);
+                let failed_count = result
+                    .get("results")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter(|item| {
+                                item.get("status").and_then(Value::as_str) == Some("failed")
+                            })
+                            .count()
+                    })
+                    .unwrap_or(0);
                 Ok(json!({
-                    "status": if with_sim > 0 { "success" } else { "warning" },
-                    "message": if with_sim > 0 {
-                        format!("已读取 {} 场轻量模拟/比分矩阵信息。", with_sim)
+                    "status": if failed_count > 0 { "warning" } else if success_count > 0 { "success" } else { "warning" },
+                    "message": if success_count > 0 {
+                        format!("已完成 {} 场 50000 次 Monte Carlo 模拟，失败 {} 场。", success_count, failed_count)
                     } else {
-                        "暂无模拟数据；导出包会标记暂无模拟，不中断。".to_string()
-                    }
+                        "暂无可模拟比赛；导出包会使用轻量 fallback，不中断。".to_string()
+                    },
+                    "result": result
                 }))
             },
         )
@@ -15042,6 +15906,9 @@ pub fn run_app() {
             list_results,
             list_matches,
             simulate_match,
+            run_match_monte_carlo_simulation,
+            run_today_monte_carlo_simulations,
+            get_match_simulation_result,
             save_prediction,
             list_predictions,
             list_review_odds_impact,
@@ -15292,6 +16159,35 @@ mod tests {
             updated_at: "2026-07-01T18:00:00Z".to_string(),
             settlement: None,
         }
+    }
+
+    fn create_test_simulation_tables(conn: &Connection) {
+        conn.execute_batch(
+            r#"
+            create table odds_snapshots(id integer primary key, match_id text, created_at text);
+            create table match_simulation_results (
+              id integer primary key autoincrement,
+              match_id text not null,
+              snapshot_id integer,
+              simulation_version text not null,
+              iterations integer not null,
+              seed text not null,
+              home_lambda real not null,
+              away_lambda real not null,
+              adjusted_home_lambda real not null,
+              adjusted_away_lambda real not null,
+              summary_json text not null,
+              score_distribution_json text not null,
+              total_goals_distribution_json text not null,
+              margin_distribution_json text not null,
+              warnings_json text not null,
+              created_at text not null,
+              updated_at text not null,
+              unique(match_id, snapshot_id, simulation_version, iterations)
+            );
+            "#,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -17684,6 +18580,140 @@ mod tests {
         assert!(markdown.contains("lineup unknown"));
         assert!(markdown.contains("⚠ 赔率仅部分完整，EV 和市场概率判断需谨慎。"));
         assert!(!markdown.contains("* 赔率完整性：完整"));
+    }
+
+    #[test]
+    fn monte_carlo_simulation_is_reproducible_with_same_seed_and_sums_probabilities() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_test_simulation_tables(&conn);
+        let match_row = test_match_row("2040352", "英格兰", "刚果金");
+        let analysis = test_analysis("2040352");
+        let snapshot = test_snapshot("2040352", json!([]));
+        let rec = test_recommendation("2040352");
+        let first = run_monte_carlo_from_export_context(
+            &conn,
+            Some(&match_row),
+            Some(&analysis),
+            Some(&snapshot),
+            &[rec.clone()],
+            50_000,
+            Some(42),
+            true,
+            true,
+            true,
+        )
+        .unwrap();
+        let second = run_monte_carlo_from_export_context(
+            &conn,
+            Some(&match_row),
+            Some(&analysis),
+            Some(&snapshot),
+            &[rec],
+            50_000,
+            Some(42),
+            true,
+            true,
+            true,
+        )
+        .unwrap();
+        assert_eq!(first.get("summary"), second.get("summary"));
+        assert_eq!(
+            first.get("score_distribution"),
+            second.get("score_distribution")
+        );
+        assert_eq!(
+            first.get("iterations").and_then(Value::as_u64),
+            Some(50_000)
+        );
+        let summary = first.get("summary").unwrap();
+        let threeway_sum = [
+            "home_win_probability",
+            "draw_probability",
+            "away_win_probability",
+        ]
+        .iter()
+        .map(|key| summary.get(*key).and_then(Value::as_f64).unwrap_or(0.0))
+        .sum::<f64>();
+        assert!((threeway_sum - 1.0).abs() < 0.0001);
+        let total_sum = first
+            .get("total_goals_distribution")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .map(|item| {
+                item.get("probability")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0)
+            })
+            .sum::<f64>();
+        assert!((total_sum - 1.0).abs() < 0.0001);
+        let top_scores = first
+            .get("score_distribution")
+            .and_then(Value::as_array)
+            .unwrap();
+        assert!(top_scores
+            .iter()
+            .any(|item| item.get("score").and_then(Value::as_str) == Some("1:1")));
+        assert!(top_scores.len() <= 10);
+        for pair in top_scores.windows(2) {
+            assert!(
+                pair[0]
+                    .get("probability")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0)
+                    >= pair[1]
+                        .get("probability")
+                        .and_then(Value::as_f64)
+                        .unwrap_or(0.0)
+            );
+        }
+    }
+
+    #[test]
+    fn gpt_markdown_uses_cached_50000_monte_carlo_simulation() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_test_simulation_tables(&conn);
+        let match_row = test_match_row("2040352", "英格兰", "刚果金");
+        let analysis = test_analysis("2040352");
+        let snapshot = test_snapshot("2040352", json!([]));
+        let rec = test_recommendation("2040352");
+        run_monte_carlo_from_export_context(
+            &conn,
+            Some(&match_row),
+            Some(&analysis),
+            Some(&snapshot),
+            &[rec.clone()],
+            50_000,
+            Some(99),
+            true,
+            true,
+            true,
+        )
+        .unwrap();
+        let markdown = build_gpt_analysis_package_markdown(
+            Some(&match_row),
+            Some(&analysis),
+            Some(&snapshot),
+            &[rec],
+            &[],
+            &conn,
+            true,
+            true,
+            true,
+            "",
+            "无需去重",
+            "仅一个快照",
+            1,
+            "2040352",
+            "2040352",
+            "综合评分最高",
+        );
+        assert!(markdown.contains("50000次 Monte Carlo"));
+        assert!(markdown.contains("模拟版本：monte_carlo_v1"));
+        assert!(markdown.contains("随机种子：99"));
+        assert!(markdown.contains("是否 fallback：否"));
+        assert!(markdown.contains("样本误差提示：50000次模拟仍存在随机误差"));
+        assert!(!markdown.contains("轻量矩阵 9x9"));
     }
 
     #[test]

@@ -386,6 +386,28 @@ pub(crate) fn open_conn(app: &AppHandle) -> Result<Connection, String> {
         );
         create index if not exists idx_manual_analysis_notes_match
           on manual_analysis_notes(match_id, id);
+        create table if not exists match_simulation_results (
+          id integer primary key autoincrement,
+          match_id text not null,
+          snapshot_id integer,
+          simulation_version text not null,
+          iterations integer not null,
+          seed text not null,
+          home_lambda real not null,
+          away_lambda real not null,
+          adjusted_home_lambda real not null,
+          adjusted_away_lambda real not null,
+          summary_json text not null,
+          score_distribution_json text not null,
+          total_goals_distribution_json text not null,
+          margin_distribution_json text not null,
+          warnings_json text not null,
+          created_at text not null,
+          updated_at text not null,
+          unique(match_id, snapshot_id, simulation_version, iterations)
+        );
+        create index if not exists idx_match_simulation_results_match
+          on match_simulation_results(match_id, snapshot_id, simulation_version);
         create table if not exists snapshot_audit_logs (
           id integer primary key autoincrement,
           snapshot_id integer,

@@ -550,6 +550,34 @@ async function runSimulation() {
   state.simulationProgress = { done: request.simulations, total: request.simulations, percent: 1, message: "模拟完成" };
 }
 
+async function runMatchMonteCarlo() {
+  const selectedMatchId = document.querySelector("#sim-match")?.value || state.selectedSimMatchId || state.matches[0]?.id || "";
+  if (!selectedMatchId) throw new Error("请先选择比赛");
+  state.selectedSimMatchId = selectedMatchId;
+  state.simulationProgress = { done: 0, total: 50000, percent: 0, message: "后端运行 50000 次 Monte Carlo" };
+  render();
+  state.monteCarloSimulation = await api.invokeCommand("run_match_monte_carlo_simulation", {
+    request: {
+      matchId: selectedMatchId,
+      iterations: 50000,
+      useMarketCalibration: true,
+      useKnockoutAdjustment: true,
+      useLineupAdjustment: true
+    }
+  });
+  state.simulationProgress = { done: 50000, total: 50000, percent: 1, message: "Monte Carlo 模拟完成" };
+}
+
+async function runTodayMonteCarlo() {
+  state.simulationProgress = { done: 0, total: 50000, percent: 0, message: "批量运行今日 Monte Carlo" };
+  render();
+  state.monteCarloTodayResult = await api.invokeCommand("run_today_monte_carlo_simulations", {
+    request: { iterations: 50000, overwrite: true }
+  });
+  const successCount = (state.monteCarloTodayResult.results || []).filter(item => item.status === "success").length;
+  state.simulationProgress = { done: 50000, total: 50000, percent: 1, message: `今日 Monte Carlo 完成：${successCount} 场` };
+}
+
 async function saveRecommendation(index) {
   const item = state.recommendations[index];
   if (!item) return;
@@ -2846,8 +2874,35 @@ function simHtml() {
           淘汰赛模式
         </label>
         <button class="btn" data-action="simulate">运行模拟</button>
+        <button class="btn secondary" data-action="run-match-monte-carlo">运行本场50000次MC</button>
+        <button class="btn secondary" data-action="run-today-monte-carlo">运行今日全部MC</button>
         <div class="badge">当前：${rankedTeam(selectedHome)} vs ${rankedTeam(selectedAway)} · ${selectedMeta}</div>
       </section>
+      ${state.monteCarloSimulation ? `
+        <section class="panel span-12">
+          <h3>Monte Carlo 缓存结果</h3>
+          <div class="summary-grid">
+            <div><span>模拟方式</span><strong>50000次 Monte Carlo</strong></div>
+            <div><span>模拟版本</span><strong>${state.monteCarloSimulation.simulation_version || "monte_carlo_v1"}</strong></div>
+            <div><span>随机种子</span><strong>${state.monteCarloSimulation.seed || "-"}</strong></div>
+            <div><span>最近模拟时间</span><strong>${state.monteCarloSimulation.updated_at || state.monteCarloSimulation.created_at || "-"}</strong></div>
+            <div><span>主胜</span><strong>${pct(state.monteCarloSimulation.summary?.home_win_probability || 0)}</strong></div>
+            <div><span>平局</span><strong>${pct(state.monteCarloSimulation.summary?.draw_probability || 0)}</strong></div>
+            <div><span>客胜</span><strong>${pct(state.monteCarloSimulation.summary?.away_win_probability || 0)}</strong></div>
+            <div><span>fallback</span><strong>${state.monteCarloSimulation.summary?.simulation_fallback ? "是" : "否"}</strong></div>
+          </div>
+          <p class="muted">生成 GPT 分析包时会优先使用最新 Monte Carlo 缓存；50000次模拟仍存在随机误差，仅作概率参考。</p>
+        </section>
+      ` : ""}
+      ${state.monteCarloTodayResult ? `
+        <section class="panel span-12">
+          <h3>今日 Monte Carlo 批量结果</h3>
+          <p class="muted">版本 ${state.monteCarloTodayResult.simulation_version || "monte_carlo_v1"} · ${state.monteCarloTodayResult.iterations || 50000} 次 · 耗时 ${state.monteCarloTodayResult.elapsed_ms || 0}ms</p>
+          <div class="note-list">
+            ${(state.monteCarloTodayResult.results || []).map(item => `<p>${item.match_id || "-"}：${item.status || "-"} ${item.error || ""}</p>`).join("")}
+          </div>
+        </section>
+      ` : ""}
       ${state.simulationProgress ? `
         <section class="panel span-12">
           <div class="progress-head">
@@ -3191,6 +3246,8 @@ document.addEventListener("click", event => {
     state.backtest = await api.invokeCommand("backtest_report");
   });
   if (action === "simulate") safeRun("运行模拟", runSimulation);
+  if (action === "run-match-monte-carlo") safeRun("运行本场Monte Carlo", runMatchMonteCarlo);
+  if (action === "run-today-monte-carlo") safeRun("运行今日Monte Carlo", runTodayMonteCarlo);
   if (action === "refresh-recommend") safeRun("生成推荐", async () => {
     state.recommendations = await api.invokeCommand("list_recommendations");
     state.todayPlan = await api.invokeCommand("today_bet_plan");
