@@ -41,6 +41,16 @@ export const state = {
   dailyReviewSummary: null,
   simulationProgress: null,
   dataRefreshProgress: null,
+  globalRefresh: {
+    running: false,
+    startedAt: null,
+    finishedAt: null,
+    currentStep: null,
+    steps: [],
+    error: null,
+    warning: null,
+    lastResult: null
+  },
   selectedSimMatchId: "",
   selectedAnalysisMatchId: "",
   recFilter: "全部",

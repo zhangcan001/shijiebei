@@ -97,6 +97,61 @@ function logRows(state) {
   `).join("");
 }
 
+function stepBadge(status) {
+  const text = {
+    pending: "等待",
+    running: "执行中",
+    success: "成功",
+    warning: "警告",
+    failed: "失败",
+    skipped: "跳过",
+    timeout: "超时"
+  }[status] || "-";
+  const kind = status === "success" ? "good" : ["warning", "running", "skipped"].includes(status) ? "warn" : ["failed", "timeout"].includes(status) ? "bad" : "";
+  return badge(text, kind);
+}
+
+function globalRefreshProgressHtml(state) {
+  const refresh = state.globalRefresh || {};
+  const steps = refresh.steps || [];
+  const started = refresh.startedAt ? new Date(refresh.startedAt).toLocaleTimeString("zh-CN", { hour12: false }) : "-";
+  const elapsed = refresh.startedAt
+    ? Math.max(0, Math.round(((refresh.finishedAt ? new Date(refresh.finishedAt).getTime() : Date.now()) - new Date(refresh.startedAt).getTime()) / 1000))
+    : 0;
+  const current = steps.find(step => step.key === refresh.currentStep) || steps.find(step => step.status === "running");
+  const statusText = refresh.running ? "正在刷新" : refresh.error ? "失败" : refresh.warning ? "完成但有提示" : refresh.finishedAt ? "完成" : "空闲";
+  return `
+    <section class="panel span-12">
+      <div class="card-head">
+        <div>
+          <h3>全局刷新进度</h3>
+          <p class="muted">当前状态：${statusText} · 开始：${started} · 已耗时：${elapsed}s · 当前步骤：${current?.label || "-"}</p>
+        </div>
+        <div class="actions source-actions">
+          <button class="btn ghost" data-action="reset-global-refresh-state">重置刷新状态</button>
+        </div>
+      </div>
+      ${refresh.error || refresh.warning ? `<p class="muted wrap-text">${safe(refresh.error || refresh.warning)}</p>` : ""}
+      <div class="scroll-table">
+        <table>
+          <thead><tr><th>步骤</th><th>状态</th><th>耗时</th><th>说明</th><th>错误</th></tr></thead>
+          <tbody>
+            ${steps.length ? steps.map(step => `
+              <tr>
+                <td>${step.label}</td>
+                <td>${stepBadge(step.status)}</td>
+                <td>${step.durationMs ? `${Math.round(step.durationMs / 1000)}s` : "-"}</td>
+                <td class="wrap-text">${safe(step.message)}</td>
+                <td class="wrap-text">${safe(step.error)}</td>
+              </tr>
+            `).join("") : `<tr><td colspan="5" class="muted">尚未执行全局刷新。</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
 export function renderSourceView(state) {
   const providers = state.providers || state.status?.providers || [];
   const config = state.externalConfig || {};
@@ -108,6 +163,7 @@ export function renderSourceView(state) {
   ];
   const apiFootball = providers.find(provider => (provider.provider_id || "").includes("api_football"));
   const oddsMissing = Number(state.snapshotDebug?.odds_available_count || 0) === 0;
+  const refreshRunning = Boolean(state.globalRefresh?.running);
   return `
     <div class="source-page">
       ${dataRefreshProgressHtml(state.dataRefreshProgress)}
@@ -119,13 +175,15 @@ export function renderSourceView(state) {
             <p class="muted">当前数据状态：${state.status ? "已加载" : "等待加载"} · 最近刷新：${refresh.lastHealthAt || refresh.lastGlobalAt || "-"}</p>
           </div>
           <div class="actions source-actions">
-            <button class="btn" data-action="global-refresh">全局刷新</button>
+            <button class="btn" data-action="global-refresh" ${refreshRunning ? "disabled" : ""}>${refreshRunning ? "正在刷新..." : "全局刷新"}</button>
             <button class="btn secondary" data-action="save-source-config">保存配置</button>
             <button class="btn secondary" data-action="create-today-pre-match-snapshots">生成今日快照</button>
             <button class="btn ghost" data-action="open-backup-dir">打开备份目录</button>
           </div>
         </div>
       </section>
+
+      ${globalRefreshProgressHtml(state)}
 
       <section class="panel span-12">
         <div class="card-head"><h3>API 配置</h3></div>
@@ -144,7 +202,7 @@ export function renderSourceView(state) {
           <button class="btn secondary" data-action="refresh-core">同步赔率</button>
           <button class="btn secondary" data-action="refresh-results">同步赛果</button>
           <button class="btn secondary" data-action="refresh-sporttery-injury">同步伤停/首发</button>
-          <button class="btn" data-action="global-refresh">全局刷新</button>
+          <button class="btn" data-action="global-refresh" ${refreshRunning ? "disabled" : ""}>${refreshRunning ? "正在刷新..." : "全局刷新"}</button>
           <button class="btn secondary" data-action="create-today-pre-match-snapshots">生成今日快照</button>
           <button class="btn ghost" data-action="open-backup-dir">打开备份目录</button>
         </div>

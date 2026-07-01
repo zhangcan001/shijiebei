@@ -45,9 +45,15 @@ async function safeRun(message, fn) {
   try {
     setBusy(message);
     await fn();
-    clearBusy("完成");
   } catch (error) {
-    clearBusy(error?.message || String(error));
+    state.message = error?.message || String(error);
+  } finally {
+    state.busy = false;
+    if (state.globalRefresh?.running !== true) {
+      state.dataRefreshProgress = state.dataRefreshProgress?.status === "running" ? null : state.dataRefreshProgress;
+    }
+    if (!state.message || state.message === message) state.message = "完成";
+    render();
   }
 }
 
@@ -459,22 +465,209 @@ async function clearProviderCache(providerId) {
   state.status = await api.invokeCommand("app_status");
 }
 
+const GLOBAL_REFRESH_STEPS = [
+  ["matches", "同步今日比赛"],
+  ["odds", "同步赔率"],
+  ["results", "同步赛果"],
+  ["injuries_lineups", "同步伤停/首发"],
+  ["snapshots", "刷新赛前快照状态"],
+  ["recommendations", "刷新今日建议"],
+  ["upset_lab", "刷新冷门实验室"],
+  ["health", "刷新数据健康"]
+];
+const GLOBAL_REFRESH_STEP_TIMEOUT_MS = 15000;
+const GLOBAL_REFRESH_TOTAL_TIMEOUT_MS = 60000;
+const GLOBAL_REFRESH_STALE_MS = 90000;
+
+function makeGlobalRefreshSteps() {
+  return GLOBAL_REFRESH_STEPS.map(([key, label]) => ({
+    key,
+    label,
+    status: "pending",
+    startedAt: null,
+    finishedAt: null,
+    durationMs: 0,
+    message: "",
+    error: ""
+  }));
+}
+
+function setGlobalRefreshState(patch = {}) {
+  state.globalRefresh = {
+    ...(state.globalRefresh || {}),
+    ...patch
+  };
+  const runningStep = (state.globalRefresh.steps || []).find(step => step.status === "running");
+  const done = (state.globalRefresh.steps || []).filter(step => ["success", "warning", "failed", "skipped", "timeout"].includes(step.status)).length;
+  const total = (state.globalRefresh.steps || []).length || GLOBAL_REFRESH_STEPS.length;
+  state.dataRefreshProgress = state.globalRefresh.running || state.globalRefresh.finishedAt ? {
+    step: done,
+    total,
+    percent: total ? done / total : 0,
+    label: runningStep?.label || (state.globalRefresh.running ? "全局刷新数据" : "全局刷新结束"),
+    status: state.globalRefresh.error ? "failed" : state.globalRefresh.warning ? "warning" : state.globalRefresh.running ? "running" : "ok",
+    message: state.globalRefresh.error || state.globalRefresh.warning || runningStep?.message || state.globalRefresh.lastResult?.message || "全局刷新状态已更新"
+  } : null;
+  render();
+}
+
+function updateGlobalRefreshStep(key, patch = {}) {
+  const steps = (state.globalRefresh?.steps || makeGlobalRefreshSteps()).map(step => {
+    if (step.key !== key) return step;
+    return { ...step, ...patch };
+  });
+  setGlobalRefreshState({ steps, currentStep: key });
+}
+
+async function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} 超时`)), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function runGlobalRefreshStep(key, label, fn, options = {}) {
+  const startedAt = new Date().toISOString();
+  const start = Date.now();
+  updateGlobalRefreshStep(key, { status: "running", startedAt, message: "正在执行", error: "" });
+  try {
+    const result = await withTimeout(Promise.resolve().then(fn), options.timeoutMs || GLOBAL_REFRESH_STEP_TIMEOUT_MS, label);
+    const status = result?.status === "skipped" ? "skipped" : result?.status === "warning" ? "warning" : "success";
+    updateGlobalRefreshStep(key, {
+      status,
+      finishedAt: new Date().toISOString(),
+      durationMs: Date.now() - start,
+      message: result?.message || "完成",
+      error: ""
+    });
+    return { key, status, result };
+  } catch (error) {
+    const message = error?.message || String(error);
+    const status = message.includes("超时") ? "timeout" : "failed";
+    updateGlobalRefreshStep(key, {
+      status,
+      finishedAt: new Date().toISOString(),
+      durationMs: Date.now() - start,
+      message: status === "timeout" ? `${label} 超时，已继续后续步骤` : `${label} 失败，已继续后续步骤`,
+      error: message
+    });
+    return { key, status, error: message };
+  }
+}
+
+function resetGlobalRefreshState() {
+  state.globalRefresh = {
+    running: false,
+    startedAt: null,
+    finishedAt: new Date().toISOString(),
+    currentStep: null,
+    steps: [],
+    error: null,
+    warning: "已重置刷新状态。若后台请求仍在运行，请稍后再试。",
+    lastResult: null
+  };
+  state.busy = false;
+  state.dataRefreshProgress = null;
+  state.message = state.globalRefresh.warning;
+  render();
+}
+
 async function refreshExternalSources() {
-  state.dataRefreshProgress = { step: 0, total: 9, percent: 0, label: "准备刷新", status: "running", message: "开始全局数据源刷新" };
-  state.probeResult = await api.invokeCommand("refresh_all_data_sources");
-  state.dataRefreshProgress = { step: 9, total: 9, percent: 1, label: "全局刷新完成", status: "ok", message: state.probeResult?.message || "全局数据源刷新完成" };
-  state.status = await api.invokeCommand("app_status");
-  state.providers = state.status?.providers || await api.invokeCommand("list_providers");
-  state.activeModel = await api.invokeCommand("get_active_model_info");
-  state.matches = await api.invokeCommand("list_matches");
-  state.recommendations = await api.invokeCommand("list_recommendations").catch(() => state.recommendations || []);
-  state.todayPlan = await api.invokeCommand("today_bet_plan").catch(() => state.todayPlan);
-  state.practicalAdvice = await api.invokeCommand("worldcup_practical_advice").catch(() => state.practicalAdvice);
-  state.upsetLabCandidates = await api.invokeCommand("get_upset_lab_candidates").catch(() => state.upsetLabCandidates || []);
-  state.upsetLabSummary = await api.invokeCommand("get_upset_lab_summary").catch(() => state.upsetLabSummary);
-  state.upsetLabBacktest = await api.invokeCommand("get_upset_lab_backtest_summary").catch(() => state.upsetLabBacktest);
-  state.upsetLabRobustness = await api.invokeCommand("get_upset_lab_robustness_summary").catch(() => state.upsetLabRobustness);
-  state.upsetLabDebug = await api.invokeCommand("debug_upset_lab_generation").catch(() => state.upsetLabDebug);
+  const current = state.globalRefresh || {};
+  if (current.running) {
+    const elapsed = current.startedAt ? Date.now() - new Date(current.startedAt).getTime() : 0;
+    state.message = elapsed > GLOBAL_REFRESH_STALE_MS
+      ? "上一次全局刷新可能已卡住，可点击“重置刷新状态”。"
+      : "全局刷新正在进行，请稍后。";
+    render();
+    return;
+  }
+  const startedAt = new Date().toISOString();
+  setGlobalRefreshState({
+    running: true,
+    startedAt,
+    finishedAt: null,
+    currentStep: null,
+    steps: makeGlobalRefreshSteps(),
+    error: null,
+    warning: null,
+    lastResult: null
+  });
+  const results = [];
+  const startedMs = Date.now();
+  try {
+    results.push(await runGlobalRefreshStep("matches", "同步今日比赛", async () => {
+      await api.invokeCommand("refresh_core_data", { oddsApiKey: "", region: "eu" });
+      state.matches = await api.invokeCommand("list_matches");
+      return { message: `今日比赛 ${state.matches.length} 场` };
+    }));
+    results.push(await runGlobalRefreshStep("odds", "同步赔率", async () => {
+      state.movements = await loadOptional("list_odds_movements", state.movements || []);
+      state.anomalies = await loadOptional("list_odds_anomalies", state.anomalies || []);
+      state.oddsHistory = await loadOptional("list_odds_history", state.oddsHistory || []);
+      return { message: `赔率快照 ${state.oddsHistory.length} 条` };
+    }));
+    results.push(await runGlobalRefreshStep("results", "同步赛果", async () => {
+      await refreshResultsAndSettle("全局刷新");
+      return { message: `赛果 ${state.results?.length || 0} 条` };
+    }));
+    results.push(await runGlobalRefreshStep("injuries_lineups", "同步伤停/首发", async () => {
+      const result = await api.invokeCommand("refresh_sporttery_injuries").catch(error => ({ status: "warning", message: error?.message || String(error) }));
+      return result?.status === "warning" ? result : { message: "伤停/首发同步完成" };
+    }));
+    results.push(await runGlobalRefreshStep("snapshots", "刷新赛前快照状态", async () => {
+      state.preMatchSnapshots = await loadOptional("get_pre_match_snapshots", state.preMatchSnapshots || []);
+      state.snapshotAuditLogs = await loadOptional("get_snapshot_audit_logs", state.snapshotAuditLogs || []);
+      state.snapshotDebug = await loadOptional("debug_snapshot_flow", state.snapshotDebug);
+      return { message: `快照 ${state.preMatchSnapshots.length} 条` };
+    }));
+    results.push(await runGlobalRefreshStep("recommendations", "刷新今日建议", async () => {
+      state.recommendations = await loadOptional("list_recommendations", state.recommendations || []);
+      state.todayPlan = await loadOptional("today_bet_plan", state.todayPlan);
+      state.practicalAdvice = await loadOptional("worldcup_practical_advice", state.practicalAdvice);
+      return { message: `推荐 ${state.recommendations.length} 条` };
+    }));
+    if (Date.now() - startedMs < GLOBAL_REFRESH_TOTAL_TIMEOUT_MS) {
+      results.push(await runGlobalRefreshStep("upset_lab", "刷新冷门实验室", async () => {
+        await refreshUpsetLab();
+        return { message: `冷门候选 ${state.upsetLabCandidates.length} 条` };
+      }));
+    } else {
+      updateGlobalRefreshStep("upset_lab", {
+        status: "skipped",
+        finishedAt: new Date().toISOString(),
+        message: "全局刷新总耗时过长，已跳过冷门实验室"
+      });
+    }
+    results.push(await runGlobalRefreshStep("health", "刷新数据健康", async () => {
+      await refreshDataHealth("全局刷新");
+      return { message: "数据健康已更新" };
+    }));
+  } finally {
+    const failed = (state.globalRefresh.steps || []).filter(step => ["failed", "timeout"].includes(step.status));
+    const warnings = (state.globalRefresh.steps || []).filter(step => ["warning", "skipped"].includes(step.status));
+    const message = failed.length
+      ? `全局刷新未完全成功：${failed.map(step => `${step.label}${step.status === "timeout" ? "超时" : "失败"}`).join("；")}。已完成其他可用步骤。`
+      : warnings.length
+        ? `全局刷新完成，但有提示：${warnings.map(step => step.message || step.label).join("；")}`
+        : "全局刷新完成";
+    setGlobalRefreshState({
+      running: false,
+      finishedAt: new Date().toISOString(),
+      currentStep: null,
+      error: failed[0]?.error || null,
+      warning: failed.length ? message : warnings.length ? message : null,
+      lastResult: { message, results }
+    });
+    state.busy = false;
+    state.message = message;
+    markRefresh("lastGlobalAt", message, "手动");
+  }
 }
 
 async function runTrainingPipeline() {
@@ -2520,7 +2713,7 @@ function render(options = {}) {
           </div>
           <div class="actions">
             <button class="btn ghost" data-action="refresh-current-view">同步当前页</button>
-            <button class="btn secondary" data-action="refresh-external">全局刷新</button>
+            <button class="btn secondary" data-action="refresh-external" ${state.globalRefresh?.running ? "disabled" : ""}>${state.globalRefresh?.running ? "正在刷新..." : "全局刷新"}</button>
           </div>
         </div>
         ${refreshStatusBarHtml({
@@ -2633,6 +2826,7 @@ document.addEventListener("click", event => {
   if (action === "save-external" || action === "save-source-config") safeRun("保存外部源", saveExternalConfig);
   if (action === "refresh-sporttery-injury") safeRun("刷新竞彩网伤停", refreshSportteryInjuries);
   if (action === "refresh-external" || action === "global-refresh") safeRun("刷新外部源", refreshExternalSources);
+  if (action === "reset-global-refresh-state") resetGlobalRefreshState();
   if (action === "probe-injury") safeRun("测试伤停源", async () => probeExternal(document.querySelector("#injury-url")?.value || ""));
   if (action === "probe-lineup") safeRun("测试首发源", async () => probeExternal(document.querySelector("#lineup-url")?.value || ""));
   if (action === "probe-stats") safeRun("测试统计源", async () => probeExternal(document.querySelector("#stats-url")?.value || ""));

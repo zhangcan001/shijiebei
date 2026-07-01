@@ -11737,6 +11737,22 @@ async fn auto_tune_model(app: AppHandle) -> Result<ModelSettings, String> {
     Ok(settings)
 }
 
+#[tauri::command]
+async fn debug_refresh_state() -> Result<Value, String> {
+    Ok(json!({
+        "frontend_running_state": "reported_by_frontend_globalRefresh",
+        "backend_active_tasks": "not_tracked",
+        "last_global_refresh_started_at": Value::Null,
+        "last_global_refresh_finished_at": Value::Null,
+        "last_failed_step": Value::Null,
+        "last_error": Value::Null,
+        "suggested_actions": [
+            "如果页面长时间显示正在处理，请点击数据源页的“重置刷新状态”。",
+            "当前版本前端已按步骤设置超时；后端批量任务不维护可取消任务队列。"
+        ]
+    }))
+}
+
 pub fn run_app() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -11821,7 +11837,8 @@ pub fn run_app() {
             get_upset_lab_robustness_summary,
             get_model_settings,
             save_model_settings,
-            auto_tune_model
+            auto_tune_model,
+            debug_refresh_state
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -12048,6 +12065,8 @@ mod tests {
         assert!(source.contains("data-action=\"clear-source-key\""));
         assert!(source.contains("data-action=\"create-today-pre-match-snapshots\""));
         assert!(source.contains("data-action=\"test-source\""));
+        assert!(source.contains("data-action=\"reset-global-refresh-state\""));
+        assert!(source.contains("正在刷新..."));
         assert!(!source.contains("data-action=\"save-provider-key\""));
         assert!(source.contains("data-provider-id"));
         assert!(source.contains("尚未配置外部数据源"));
@@ -12055,6 +12074,28 @@ mod tests {
         assert!(source.contains("赔率缺失"));
         assert!(!source.contains("api_key"));
         assert!(!source.contains("apiKey"));
+    }
+
+    #[test]
+    fn global_refresh_frontend_uses_timeout_finally_and_reset() {
+        let source = include_str!("../../../src/legacyMain.js");
+        assert!(source.contains("async function withTimeout"));
+        assert!(source.contains("GLOBAL_REFRESH_STEP_TIMEOUT_MS"));
+        assert!(source.contains("GLOBAL_REFRESH_TOTAL_TIMEOUT_MS"));
+        assert!(source.contains("GLOBAL_REFRESH_STALE_MS"));
+        assert!(source.contains("finally"));
+        assert!(source.contains("resetGlobalRefreshState"));
+        assert!(source.contains("globalRefresh.running"));
+        assert!(source.contains("全局刷新正在进行，请稍后"));
+    }
+
+    #[test]
+    fn debug_refresh_state_command_is_registered() {
+        let source = include_str!("legacy_commands.rs");
+        assert!(source.contains("async fn debug_refresh_state"));
+        assert!(source.contains("debug_refresh_state"));
+        assert!(source.contains("\"backend_active_tasks\""));
+        assert!(source.contains("\"not_tracked\""));
     }
 
     #[test]
