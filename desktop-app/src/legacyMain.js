@@ -66,6 +66,68 @@ async function loadOptional(command, fallback = null) {
   }
 }
 
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "readonly");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  textarea.remove();
+}
+
+async function copyGptAnalysisPackage(matchId) {
+  const packageResult = await api.invokeCommand("gpt_analysis_package", { matchId });
+  state.gptAnalysisPackage = packageResult;
+  await copyTextToClipboard(packageResult.markdown || "");
+  state.probeResult = { ok: true, message: "GPT 分析包已复制到剪贴板。", warning: packageResult.warning || "" };
+}
+
+async function copyTodayGptAnalysisPackages() {
+  const packageResult = await api.invokeCommand("gpt_today_analysis_packages");
+  state.gptAnalysisPackage = packageResult;
+  await copyTextToClipboard(packageResult.markdown || "");
+  state.probeResult = { ok: true, message: packageResult.message || "今日 GPT 分析包已复制。", count: packageResult.count || 0 };
+}
+
+async function exportTodayGptAnalysisPackages() {
+  state.probeResult = await api.invokeCommand("export_gpt_today_analysis_markdown");
+}
+
+function prepareManualAnalysis(matchId, label = "") {
+  state.manualAnalysisDraftMatchId = matchId || "";
+  state.manualAnalysisDraftLabel = label || matchId || "";
+  state.message = matchId ? `准备记录人工分析：${state.manualAnalysisDraftLabel}` : "请选择比赛。";
+}
+
+async function saveManualAnalysisNote() {
+  const matchId = state.manualAnalysisDraftMatchId || document.querySelector("#manual-match-id")?.value || "";
+  if (!matchId.trim()) throw new Error("请先选择要记录的比赛。");
+  const input = {
+    matchId,
+    snapshotId: Number(document.querySelector("#manual-snapshot-id")?.value || 0) || null,
+    analysisSource: document.querySelector("#manual-source")?.value || "gpt_web",
+    analystPick: document.querySelector("#manual-pick")?.value || "",
+    analystReason: document.querySelector("#manual-reason")?.value || "",
+    confidence: document.querySelector("#manual-confidence")?.value || "",
+    riskLevel: document.querySelector("#manual-risk")?.value || "",
+    rawPrompt: state.gptAnalysisPackage?.markdown || "",
+    rawResponse: document.querySelector("#manual-response")?.value || ""
+  };
+  if (!input.analystPick.trim() && !input.analystReason.trim()) {
+    throw new Error("请填写人工结论或理由。");
+  }
+  state.probeResult = await api.invokeCommand("save_manual_analysis_note", { input });
+  state.manualAnalysisNotes = await loadOptional("get_manual_analysis_notes", state.manualAnalysisNotes || []);
+  state.manualAnalysisComparison = await loadOptional("manual_analysis_review_comparison", state.manualAnalysisComparison);
+}
+
 function nowLabel() {
   return new Date().toLocaleTimeString("zh-CN", { hour12: false });
 }
@@ -176,6 +238,8 @@ async function refreshViewContext(view, source = "切页", force = false) {
     state.dailyReviewSummary = await api.invokeCommand("daily_review_summary", { date: "2026-06-29" }).catch(() => state.dailyReviewSummary);
     state.diagnostics = await loadOptional("model_diagnostics", state.diagnostics);
     state.backtest = await loadOptional("backtest_report", state.backtest);
+    state.manualAnalysisNotes = await loadOptional("get_manual_analysis_notes", state.manualAnalysisNotes || []);
+    state.manualAnalysisComparison = await loadOptional("manual_analysis_review_comparison", state.manualAnalysisComparison);
     markRefresh("lastResultsAt", "复盘统计已更新", source);
   }
   if (view === "sources") await refreshDataHealth(source);
@@ -219,6 +283,8 @@ async function loadStatus() {
   state.snapshotDebug = await loadOptional("debug_snapshot_flow", null);
   state.livePaperSummary = await loadOptional("get_live_paper_trading_summary", null);
   state.livePaperRecords = await loadOptional("get_live_paper_trading_records", []);
+  state.manualAnalysisNotes = await loadOptional("get_manual_analysis_notes", []);
+  state.manualAnalysisComparison = await loadOptional("manual_analysis_review_comparison", null);
   state.systemStatus = await loadOptional("get_system_status", state.systemStatus);
   state.startupHealth = await loadOptional("get_startup_health_check", state.startupHealth);
   markRefresh("lastGlobalAt", "启动数据已加载", "启动");
@@ -1212,6 +1278,51 @@ function dailyReviewSummaryHtml() {
   `;
 }
 
+function manualAnalysisComparisonHtml() {
+  const rows = state.manualAnalysisComparison?.rows || [];
+  const notes = state.manualAnalysisNotes || [];
+  if (!rows.length && !notes.length) {
+    return `
+      <section class="panel span-12">
+        <h3>软件 / GPT人工 / 市场 对比</h3>
+        <p class="muted">暂无人工分析记录。可在今日方案、预测中心或赛前快照点击“人工结论”保存。</p>
+      </section>
+    `;
+  }
+  const sourceRows = rows.length ? rows : notes.map(note => ({
+    match_id: note.match_id,
+    analysis_source: note.analysis_source,
+    analyst_pick: note.analyst_pick,
+    model_hit: null,
+    manual_hit: null,
+    market_hit: null,
+    best_source: "pending_or_unknown",
+    created_at: note.created_at
+  }));
+  return `
+    <section class="panel span-12 table-panel">
+      <h3>软件 / GPT人工 / 市场 对比</h3>
+      <p class="muted">${state.manualAnalysisComparison?.note || "人工结论用于赛后复盘，不会自动改模型或推荐规则。"}</p>
+      <div class="scroll-table">
+        <table><thead><tr><th>时间</th><th>比赛ID</th><th>来源</th><th>人工结论</th><th>模型命中</th><th>人工命中</th><th>市场命中</th><th>最佳来源</th></tr></thead><tbody>
+          ${sourceRows.slice(0, 80).map(row => `
+            <tr>
+              <td>${row.created_at || "-"}</td>
+              <td>${row.match_id || "-"}</td>
+              <td>${row.analysis_source || "-"}</td>
+              <td>${row.analyst_pick || "-"}</td>
+              <td>${row.model_hit == null ? "待复核" : row.model_hit ? "命中" : "未中"}</td>
+              <td>${row.manual_hit == null ? "待复核" : row.manual_hit ? "命中" : "未中"}</td>
+              <td>${row.market_hit == null ? "待复核" : row.market_hit ? "命中" : "未中"}</td>
+              <td>${row.best_source || "-"}</td>
+            </tr>
+          `).join("")}
+        </tbody></table>
+      </div>
+    </section>
+  `;
+}
+
 function oddsImpactRows() {
   const rows = state.reviewOddsImpact || [];
   if (!rows.length) {
@@ -1254,8 +1365,17 @@ function settleSummaryHtml() {
 }
 
 function badge(text) {
-  const cls = /可买|盈利|正/.test(text) ? "good" : /观察|等待|小注|中/.test(text) ? "warn" : "bad";
-  return `<span class="badge ${cls}">${text || "-"}</span>`;
+  const label = decisionLabel(text || "-");
+  const cls = /模型倾向|盈利|正/.test(label) ? "good" : /观察|等待|小注|中/.test(label) ? "warn" : "bad";
+  return `<span class="badge ${cls}">${label}</span>`;
+}
+
+function decisionLabel(text = "-") {
+  if (text === "可买" || text === "recommend") return "模型倾向";
+  if (text === "small_stake" || text === "价值小注" || text === "进球数小注" || text === "冷门小注") return "小注观察";
+  if (text === "hard_ban") return "禁买";
+  if (text === "wait_for_lineup" || text === "wait_for_odds") return "等待观察";
+  return text || "-";
 }
 
 function recommendationRows(limit = 80) {
@@ -1288,13 +1408,13 @@ function recommendationRows(limit = 80) {
       <td>${money(item.stake_pct)}<div class="muted">${state.bankroll ? Math.round(item.stake_pct * state.bankroll.bankroll) : 0}</div></td>
       <td>${badge(item.final_decision || item.decision)}<div class="muted">${badge(item.decision)} <span class="badge">${item.confidence}</span></div><div class="muted reason">${item.action_advice || item.play_style}</div><div class="muted reason">风险等级：${item.play_type_risk_level || "-"}</div><div class="muted reason">赔率异常：${item.anomaly_type || "-"} ${item.anomaly_severity || ""} ${item.anomaly_advice || ""}</div><div class="muted reason">${item.reason}</div><div class="muted reason">支持：${item.support_factors || "-"}</div><div class="muted reason">风险：${item.risk_factors || "-"}</div></td>
       <td>${item.combo_group || "-"}</td>
-      <td><button class="mini" data-action="save-rec" data-index="${index}">存复盘</button></td>
+      <td><button class="mini" data-action="copy-gpt-package" data-match-id="${item.match_id}">复制GPT包</button><button class="mini" data-action="prepare-manual-analysis" data-match-id="${item.match_id}" data-match-label="${rankedMatchLabel(item.match_label)}">人工结论</button><button class="mini" data-action="save-rec" data-index="${index}">存复盘</button></td>
     </tr>
   `}).join("");
 }
 
 function pickSummary(item) {
-  return `${rankedMatchLabel(item.match_label)}｜${item.market}｜${item.pick}｜赔率 ${odds(item.odds)}｜仓位 ${money(item.stake_pct)}`;
+  return `${rankedMatchLabel(item.match_label)}｜${item.market}｜${item.pick}｜赔率 ${odds(item.odds)}｜仓位参考 ${money(item.stake_pct)}`;
 }
 
 function purchasePlanHtml() {
@@ -1311,25 +1431,26 @@ function purchasePlanHtml() {
 
   return `
     <section class="panel span-12 plan-panel">
-      <h3>一键购买方案</h3>
+      <h3>模型数据方案</h3>
       <div class="plan-grid">
         <div>
-          <h4>优先单关</h4>
-          <p class="muted">${bankers.length ? bankers.map(pickSummary).join("<br>") : "暂无稳胆单关。宁可空仓，不硬买。"}</p>
+          <h4>模型倾向</h4>
+          <p class="muted">${bankers.length ? bankers.map(pickSummary).join("<br>") : "暂无稳胆方向。宁可空仓，不硬选。"}</p>
         </div>
         <div>
           <h4>二串一候选</h4>
           <p class="muted">${comboText}</p>
         </div>
         <div>
-          <h4>价值小注</h4>
+          <h4>小注观察</h4>
           <p class="muted">${valueSingles.length ? valueSingles.map(pickSummary).join("<br>") : "暂无价值小注。"}</p>
         </div>
         <div>
-          <h4>冷门小注</h4>
+          <h4>冷门观察</h4>
           <p class="muted">${longshots.length ? longshots.map(pickSummary).join("<br>") : "暂无冷门小注。高赔率默认不追。"}</p>
         </div>
       </div>
+      <p class="muted">以上只作为 GPT 分析包和人工复核素材，不是自动投注指令。</p>
     </section>
   `;
 }
@@ -1395,6 +1516,60 @@ function paperTradingSummaryHtml(source = state.backtest?.paper_trading) {
   `;
 }
 
+function manualAnalysisPanelHtml() {
+  const label = state.manualAnalysisDraftLabel || state.manualAnalysisDraftMatchId || "未选择比赛";
+  return `
+    <section class="panel span-12">
+      <h3>GPT 分析包 / 人工分析记录</h3>
+      <p class="muted">本工具只整理赛前数据和冻结快照，不保证预测准确。建议复制 GPT 分析包后，结合 GPT 网页版和人工判断再记录结论。</p>
+      <div class="toolbar">
+        <button class="btn secondary" data-action="copy-today-gpt-packages">批量复制今日 GPT 分析包</button>
+        <button class="btn secondary" data-action="export-today-gpt-packages">导出今日分析包 Markdown</button>
+        <span class="muted">当前记录对象：${label}</span>
+      </div>
+      <div class="plan-grid">
+        <label>match_id
+          <input id="manual-match-id" value="${state.manualAnalysisDraftMatchId || ""}" placeholder="点击表格里的人工结论自动填入">
+        </label>
+        <label>snapshot_id
+          <input id="manual-snapshot-id" placeholder="可选">
+        </label>
+        <label>来源
+          <select id="manual-source">
+            <option value="gpt_web">gpt_web</option>
+            <option value="manual">manual</option>
+            <option value="other">other</option>
+          </select>
+        </label>
+        <label>置信度
+          <select id="manual-confidence">
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+          </select>
+        </label>
+        <label>风险
+          <select id="manual-risk">
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+          </select>
+        </label>
+        <label>人工结论
+          <input id="manual-pick" placeholder="例如：主胜 / 平局 / 2球 / 2:1 / 观察">
+        </label>
+      </div>
+      <label>理由
+        <textarea id="manual-reason" rows="3" placeholder="粘贴 GPT 或人工分析后的核心理由"></textarea>
+      </label>
+      <label>GPT 原始回复（可选）
+        <textarea id="manual-response" rows="4" placeholder="可粘贴 GPT 网页版输出，便于赛后复盘"></textarea>
+      </label>
+      <div class="toolbar"><button class="btn" data-action="save-manual-analysis">保存人工结论</button></div>
+    </section>
+  `;
+}
+
 function todayPlanHtml() {
   const plan = state.todayPlan;
   const advice = state.practicalAdvice || {};
@@ -1422,14 +1597,17 @@ function todayPlanHtml() {
         <button class="btn" data-action="refresh-today">重新生成今日方案</button>
         <button class="btn secondary" data-action="refresh-core">刷新赔率并重算</button>
         <button class="btn secondary" data-action="freeze-rec">冻结赛前快照</button>
+        <button class="btn secondary" data-action="copy-today-gpt-packages">批量复制今日 GPT 分析包</button>
+        <button class="btn secondary" data-action="export-today-gpt-packages">导出今日分析包 Markdown</button>
         <button class="btn secondary" data-view="review">赛后复盘入口</button>
         <span class="muted">${plan?.review_hint || "今日方案会自动读取最新赛前快照；没有 final snapshot 时使用最新快照并提示复查。"}</span>
       </section>
       <section class="panel span-12"><h3>等赔率提示</h3><p class="muted">${plan?.wait_notes?.length ? plan.wait_notes.join("；") : "暂无等待提示。"}</p></section>
-      <section class="panel span-12 table-panel"><h3>今日主推</h3><div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>选择</th><th>模型</th><th>市场</th><th>赔率</th><th>EV</th><th>数据</th><th>建议仓位</th></tr></thead><tbody>${practicalRows(advice.main || [], "今日暂无主推。")}</tbody></table></div></section>
-      <section class="panel span-12 table-panel"><h3>小注候选</h3><p class="muted">小注候选仍受风控约束，不等于自动下注。</p><div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>选择</th><th>模型</th><th>市场</th><th>赔率</th><th>EV</th><th>数据</th><th>建议仓位</th></tr></thead><tbody>${practicalRows(advice.small || [], "暂无小注候选。")}</tbody></table></div></section>
-      <section class="panel span-12 table-panel"><h3>观察玩法</h3><div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>选择</th><th>模型</th><th>市场</th><th>赔率</th><th>EV</th><th>数据</th><th>原因</th></tr></thead><tbody>${practicalRows(advice.watch || [], "暂无观察玩法。")}</tbody></table></div></section>
-      <section class="panel span-12 table-panel"><h3>禁买清单</h3><div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>选择</th><th>模型</th><th>市场</th><th>赔率</th><th>EV</th><th>数据</th><th>禁买原因</th></tr></thead><tbody>${practicalRows(advice.banned || [], "暂无禁买清单。")}</tbody></table></div></section>
+      ${manualAnalysisPanelHtml()}
+      <section class="panel span-12 table-panel"><h3>今日主推</h3><div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>选择</th><th>模型</th><th>市场</th><th>赔率</th><th>EV</th><th>数据</th><th>建议仓位</th><th>GPT/人工</th></tr></thead><tbody>${practicalRows(advice.main || [], "今日暂无主推。")}</tbody></table></div></section>
+      <section class="panel span-12 table-panel"><h3>小注候选</h3><p class="muted">小注候选仍受风控约束，不等于自动下注。</p><div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>选择</th><th>模型</th><th>市场</th><th>赔率</th><th>EV</th><th>数据</th><th>建议仓位</th><th>GPT/人工</th></tr></thead><tbody>${practicalRows(advice.small || [], "暂无小注候选。")}</tbody></table></div></section>
+      <section class="panel span-12 table-panel"><h3>观察玩法</h3><div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>选择</th><th>模型</th><th>市场</th><th>赔率</th><th>EV</th><th>数据</th><th>原因</th><th>GPT/人工</th></tr></thead><tbody>${practicalRows(advice.watch || [], "暂无观察玩法。")}</tbody></table></div></section>
+      <section class="panel span-12 table-panel"><h3>禁买清单</h3><div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>选择</th><th>模型</th><th>市场</th><th>赔率</th><th>EV</th><th>数据</th><th>禁买原因</th><th>GPT/人工</th></tr></thead><tbody>${practicalRows(advice.banned || [], "暂无禁买清单。")}</tbody></table></div></section>
       <section class="panel span-12 table-panel"><h3>比分参考</h3><p class="muted">比分波动大，仅供参考，不建议作为主买项。本系统按竞彩口径统计90分钟比分，加时和点球不计入比分先验。</p><div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>Top 3 比分</th><th>模型/先验/融合</th><th>形态</th><th>方向一致性</th><th>风险提示</th></tr></thead><tbody>${practicalScoreRows(advice.score_reference || [])}</tbody></table></div></section>
       ${paperTradingSummaryHtml()}
       <section class="panel span-12 table-panel"><h3>模型明细参考</h3><p class="muted">这里保留底层推荐明细，日常决策以本页上方分层为准。</p><div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>方向</th><th>推荐等级</th><th>模型概率</th><th>体彩去水</th><th>公平赔率</th><th>当前赔率</th><th>EV</th><th>数据</th><th>最终决策</th><th>操作</th></tr></thead><tbody>${recommendationDetailRows(40)}</tbody></table></div></section>
@@ -1439,7 +1617,7 @@ function todayPlanHtml() {
 
 function practicalRows(rows = [], emptyText = "暂无") {
   if (!rows.length) {
-    return `<tr><td colspan="10" class="muted">${emptyText}</td></tr>`;
+    return `<tr><td colspan="11" class="muted">${emptyText}</td></tr>`;
   }
   return rows.map(item => `
     <tr>
@@ -1453,6 +1631,7 @@ function practicalRows(rows = [], emptyText = "暂无") {
       <td class="${item.ev == null ? "" : (item.ev || 0) >= 0 ? "down" : "up"}">${item.ev == null ? "赔率缺失，不能计算 EV" : signedPct(item.ev || 0)}</td>
       <td>${Number(item.data_score || 0).toFixed(0)}<div class="muted">${(item.missing_fields || []).length ? `缺失：${item.missing_fields.join("、")}` : "数据完整"}</div></td>
       <td>${money(item.bankroll_suggestion || 0)}<div class="muted reason">${item.reason || ""}</div><div class="muted reason">${item.odds_change_note || ""}</div><div class="muted reason">快照：${item.is_final_snapshot ? "final" : "非 final"} · 赔率快照 ${item.odds_snapshot_count ?? 0}</div><div class="muted reason">${item.risk_tags || ""}</div></td>
+      <td><button class="mini" data-action="copy-gpt-package" data-match-id="${item.match_id || ""}">复制GPT包</button><button class="mini" data-action="prepare-manual-analysis" data-match-id="${item.match_id || ""}" data-match-label="${rankedMatchLabel(item.match_label || "")}">人工结论</button></td>
     </tr>
   `).join("");
 }
@@ -1571,6 +1750,8 @@ function snapshotRows() {
         <td>
           <button class="mini" data-action="create-pre-snapshot" data-match-id="${match.id}">生成当前快照</button>
           <button class="mini" data-action="view-snapshot-history" data-match-id="${match.id}" data-match-label="${rankedTeam(match.home)} vs ${rankedTeam(match.away)}">查看历史</button>
+          <button class="mini" data-action="copy-gpt-package" data-match-id="${match.id}">复制GPT包</button>
+          <button class="mini" data-action="prepare-manual-analysis" data-match-id="${match.id}" data-match-label="${rankedTeam(match.home)} vs ${rankedTeam(match.away)}">人工结论</button>
           ${snap ? `<button class="mini" data-action="mark-final-snapshot" data-snapshot-id="${snap.id}">标记最终</button>` : ""}
           ${snap ? `<button class="mini" data-action="settle-pre-snapshot" data-snapshot-id="${snap.id}">赛后结算</button>` : ""}
         </td>
@@ -1752,6 +1933,8 @@ function preMatchSnapshotHtml() {
         <button class="btn secondary" data-action="refresh-external">全局刷新数据源</button>
         <button class="btn secondary" data-action="audit-pre-snapshots">运行快照审计</button>
         <button class="btn secondary" data-action="settle-all-pre-snapshots">赛后批量结算</button>
+        <button class="btn secondary" data-action="copy-today-gpt-packages">批量复制今日 GPT 分析包</button>
+        <button class="btn secondary" data-action="export-today-gpt-packages">导出今日分析包 Markdown</button>
         <button class="btn secondary" data-action="export-app-data">导出全部数据</button>
         <button class="btn secondary" data-action="export-snapshots">导出赛前快照</button>
         <button class="btn secondary" data-action="export-snapshot-results">导出赛后结算</button>
@@ -1762,6 +1945,7 @@ function preMatchSnapshotHtml() {
         <span class="muted">赛前快照一旦生成，不会被赛后结果覆盖；结算只写入独立结果表。</span>
       </section>
       ${systemStatusHtml()}
+      ${manualAnalysisPanelHtml()}
       ${snapshotWorkflowHtml()}
       <section class="panel span-3 metric"><span>快照数</span><strong>${snapshots.length}</strong><div class="muted">允许同场多快照</div></section>
       <section class="panel span-3 metric"><span>最终快照</span><strong>${snapshots.filter(item => item.is_final_pre_match).length}</strong><div class="muted">每场最多一个</div></section>
@@ -1887,8 +2071,11 @@ function predictionCenterHtml() {
     <div class="grid">
       <section class="panel span-12 toolbar">
         <button class="btn" data-action="refresh-analysis">刷新预测</button>
+        <button class="btn secondary" data-action="copy-today-gpt-packages">批量复制今日 GPT 分析包</button>
+        <button class="btn secondary" data-action="export-today-gpt-packages">导出今日分析包 Markdown</button>
         <span class="muted">这里只显示真实概率预测，不代表值得下注；日常决策请看“今日方案”。</span>
       </section>
+      ${manualAnalysisPanelHtml()}
       ${state.analyses.map((item, matchIndex) => {
         const had = bestProb(item.had);
         const hhad = bestProb(item.hhad);
@@ -1911,6 +2098,8 @@ function predictionCenterHtml() {
               <div class="panel span-3 metric"><span>比分Top</span><strong>${score?.pick || "-"}</strong><div class="muted">${score ? pct(score.probability) : "-"}</div></div>
             </div>
             <div class="actions">
+              <button class="mini" data-action="copy-gpt-package" data-match-id="${item.match_id}">复制GPT包</button>
+              <button class="mini" data-action="prepare-manual-analysis" data-match-id="${item.match_id}" data-match-label="${rankedMatchLabel(item.match_label)}">人工结论</button>
               ${analysisSaveButtons(matchIndex, "had", item.had, [had])}
               ${analysisSaveButtons(matchIndex, "hhad", item.hhad, [hhad])}
               ${analysisSaveButtons(matchIndex, "ttg", item.ttg, [ttg])}
@@ -2102,8 +2291,11 @@ function singleMatchAnalysisHtml() {
         </label>
         <button class="btn" data-action="refresh-analysis">重新分析本场</button>
         ${item ? `<button class="btn secondary" data-action="create-pre-snapshot" data-match-id="${state.selectedAnalysisMatchId || state.matches[0]?.id || item.match_id}">生成赛前快照</button>` : ""}
+        ${item ? `<button class="btn secondary" data-action="copy-gpt-package" data-match-id="${state.selectedAnalysisMatchId || state.matches[0]?.id || item.match_id}">复制本场 GPT 分析包</button>` : ""}
+        ${item ? `<button class="btn secondary" data-action="prepare-manual-analysis" data-match-id="${state.selectedAnalysisMatchId || state.matches[0]?.id || item.match_id}" data-match-label="${rankedMatchLabel(item.match_label)}">标记人工分析</button>` : ""}
         <span class="muted">选择比赛会自动读取最新模型概率、赔率、赛前快照和市场差异。</span>
       </section>
+      ${manualAnalysisPanelHtml()}
       ${item ? `
         <section class="panel span-12 analysis-card">
           <div class="card-head">
@@ -2564,13 +2756,13 @@ function viewHtml() {
         <section class="panel span-3 metric"><span>稳胆候选</span><strong>${bankerCount}</strong><div class="muted">优先单关</div></section>
         <section class="panel span-3 metric"><span>推荐口径</span><strong>稳健</strong><div class="muted">压制高赔率幻觉</div></section>
         <section class="panel span-12 toolbar">
-          <button class="btn" data-action="refresh-recommend">一键推荐买球</button>
+          <button class="btn" data-action="refresh-recommend">刷新模型倾向</button>
           <button class="btn secondary" data-action="refresh-core">刷新赔率并重算</button>
           <button class="btn secondary" data-action="freeze-rec">冻结赛前快照</button>
           <select id="rec-filter" data-action="filter-rec">
-            ${["全部","可买","观察","稳胆","让球稳胆","价值小注","进球数小注","冷门小注","禁止"].map(item => `<option value="${item}" ${state.recFilter === item ? "selected" : ""}>${item}</option>`).join("")}
+            ${["全部","可买","观察","稳胆","让球稳胆","价值小注","进球数小注","冷门小注","禁止"].map(item => `<option value="${item}" ${state.recFilter === item ? "selected" : ""}>${decisionLabel(item)}</option>`).join("")}
           </select>
-          <span class="muted">建议优先单关/小额分散；串关只适合把“可买”里相关性低的 2 场做极小仓位。</span>
+          <span class="muted">本页只展示模型倾向、数据建议和风险提示；最终判断建议结合 GPT 分析包人工确认。</span>
         </section>
         ${purchasePlanHtml()}
         <section class="panel span-12 table-panel">
@@ -2657,6 +2849,7 @@ function viewHtml() {
       ${strategyDiagnosticsHtml()}
       ${reviewSummaryHtml()}
       ${dailyReviewSummaryHtml()}
+      ${manualAnalysisComparisonHtml()}
       <section class="panel table-panel">
         <h3>盘口影响复盘</h3>
         <p class="muted">按已结算复盘记录自动关联赛前赔率快照：降赔/升赔、最高最低、快照次数、最终赛果和盈亏，用来观察盘口变化对结果的影响。</p>
@@ -2763,6 +2956,14 @@ document.addEventListener("click", event => {
   if (action === "refresh-current-view") safeRun("同步当前页", async () => refreshViewContext(state.view, "手动", true));
   if (action === "refresh-today") safeRun("重新生成今日方案", async () => refreshTodayContext("手动"));
   if (action === "refresh-core") safeRun("刷新核心数据", refreshCore);
+  if (action === "copy-gpt-package") safeRun("复制 GPT 分析包", async () => copyGptAnalysisPackage(event.target.dataset.matchId));
+  if (action === "copy-today-gpt-packages") safeRun("批量复制 GPT 分析包", copyTodayGptAnalysisPackages);
+  if (action === "export-today-gpt-packages") safeRun("导出 GPT 分析包", exportTodayGptAnalysisPackages);
+  if (action === "prepare-manual-analysis") {
+    prepareManualAnalysis(event.target.dataset.matchId, event.target.dataset.matchLabel);
+    render();
+  }
+  if (action === "save-manual-analysis") safeRun("保存人工分析结论", saveManualAnalysisNote);
   if (action === "refresh-xg") safeRun("刷新 StatsBomb xG", refreshXg);
   if (action === "refresh-results") safeRun("刷新赛果", async () => {
     await refreshResultsAndSettle("手动");

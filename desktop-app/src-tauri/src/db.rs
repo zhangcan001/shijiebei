@@ -370,6 +370,22 @@ pub(crate) fn open_conn(app: &AppHandle) -> Result<Connection, String> {
           paper_profit_json text not null,
           settlement_status text not null
         );
+        create table if not exists manual_analysis_notes (
+          id integer primary key autoincrement,
+          match_id text not null default '',
+          snapshot_id integer,
+          analysis_source text not null default 'manual',
+          analyst_pick text not null default '',
+          analyst_reason text not null default '',
+          confidence text not null default '',
+          risk_level text not null default '',
+          raw_prompt text not null default '',
+          raw_response text not null default '',
+          created_at text not null,
+          updated_at text not null
+        );
+        create index if not exists idx_manual_analysis_notes_match
+          on manual_analysis_notes(match_id, id);
         create table if not exists snapshot_audit_logs (
           id integer primary key autoincrement,
           snapshot_id integer,
