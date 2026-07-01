@@ -8761,6 +8761,22 @@ fn recommendation_lines(recommendations: &[Recommendation]) -> String {
         .join("\n")
 }
 
+fn sanitize_gpt_export_text(text: &str) -> String {
+    text.replace("不建议重仓", "不建议提高仓位")
+        .replace(
+            "数据质量建议：可进入正式推荐",
+            "数据质量建议：数据较完整，可供人工复核，不代表投注推荐",
+        )
+        .replace(
+            "可进入正式推荐",
+            "数据质量较完整，可供人工复核，不代表投注推荐",
+        )
+        .replace("稳赚", "模型参考，不保证结果")
+        .replace("必买", "需人工复核")
+        .replace("建议重仓", "不代表投注推荐")
+        .replace("强烈买入", "观察并人工复核")
+}
+
 fn recommendation_lookup<'a>(
     recommendations: &'a [Recommendation],
     market_prefix: &str,
@@ -9474,7 +9490,7 @@ fn build_gpt_analysis_package_markdown(
     } else {
         data_merge_note
     };
-    format!(
+    let markdown = format!(
         r#"# GPT赛前分析包：{label}
 
 > 本分析包用于复制到 GPT 网页版或人工复核。软件不保证预测准确，自动推荐默认作为 observation_only 参考；比分、总进球、冷门玩法默认观察。
@@ -9712,7 +9728,8 @@ fn build_gpt_analysis_package_markdown(
         recommendation_lines = recommendation_lines(recommendations),
         upset_markdown = upset_markdown,
         questions = gpt_questions_markdown(),
-    )
+    );
+    sanitize_gpt_export_text(&markdown)
 }
 
 async fn build_gpt_analysis_package(
@@ -17486,6 +17503,19 @@ mod tests {
         assert!(markdown.contains("final snapshot 否"));
         assert!(markdown.contains("* 数据质量：数据质量较完整，可供人工复核"));
         assert!(!markdown.contains("可进入正式推荐"));
+    }
+
+    #[test]
+    fn gpt_export_sanitizer_removes_misleading_betting_wording() {
+        let text = "数据质量建议：可进入正式推荐；稳赚；必买；建议重仓；强烈买入；不建议重仓";
+        let sanitized = sanitize_gpt_export_text(text);
+        assert!(!sanitized.contains("可进入正式推荐"));
+        assert!(!sanitized.contains("稳赚"));
+        assert!(!sanitized.contains("必买"));
+        assert!(!sanitized.contains("建议重仓"));
+        assert!(!sanitized.contains("强烈买入"));
+        assert!(sanitized.contains("数据较完整，可供人工复核"));
+        assert!(sanitized.contains("不代表投注推荐"));
     }
 
     #[test]
