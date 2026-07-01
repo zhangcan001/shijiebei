@@ -21,6 +21,7 @@ const views = [
   ["match", "单场分析"],
   ["sim", "模拟对决"],
   ["movements", "赔率异动"],
+  ["snapshots", "赛前快照"],
   ["upset", "冷门实验室"],
   ["results", "赛果中心"],
   ["review", "复盘中心"],
@@ -144,6 +145,15 @@ async function refreshViewContext(view, source = "切页", force = false) {
   if (view === "today") await refreshTodayContext(source);
   if (view === "prediction" || view === "match") await refreshPredictionContext(source);
   if (view === "movements") await refreshOddsContext(source);
+  if (view === "snapshots") {
+    state.matches = await loadOptional("list_matches", state.matches || []);
+    state.preMatchSnapshots = await loadOptional("get_pre_match_snapshots", state.preMatchSnapshots || []);
+    state.snapshotAuditLogs = await loadOptional("get_snapshot_audit_logs", state.snapshotAuditLogs || []);
+    state.snapshotDebug = await loadOptional("debug_snapshot_flow", state.snapshotDebug);
+    state.livePaperSummary = await loadOptional("get_live_paper_trading_summary", state.livePaperSummary);
+    state.livePaperRecords = await loadOptional("get_live_paper_trading_records", state.livePaperRecords || []);
+    markRefresh("lastHealthAt", "赛前快照已更新", source);
+  }
   if (view === "upset") {
     state.scorePriors = await loadOptional("get_worldcup_knockout_score_priors", state.scorePriors);
     state.upsetLabCandidates = await loadOptional("get_upset_lab_candidates", state.upsetLabCandidates || []);
@@ -530,6 +540,11 @@ async function markFinalPreMatchSnapshot(snapshotId) {
   state.practicalAdvice = await api.invokeCommand("worldcup_practical_advice");
 }
 
+async function viewSnapshotHistory(matchId, matchLabel = "") {
+  state.selectedSnapshotHistory = await api.invokeCommand("get_match_snapshot_history", { matchId });
+  state.selectedSnapshotMatchLabel = matchLabel || matchId;
+}
+
 async function settlePreMatchSnapshot(snapshotId) {
   const score = prompt("输入赛果比分，例如 2:1");
   if (!score) return;
@@ -649,6 +664,7 @@ function pageDescription(view = state.view) {
     match: "单场深挖：拆胜平负、让球、总进球、比分和市场差异。",
     sim: "假设推演：手动调整 λ 后运行 Monte Carlo。",
     movements: "市场监控：赔率快照、异动和异常风险。",
+    snapshots: "赛前冻结：生成、查看、标记 final、审计和结算赛前快照。",
     upset: "高风险观察：冷平、让球爆冷、极端总进球和比分只做纸面/极小仓位实验。",
     results: "赛果与结算入口：最新比赛在上，自动带动复盘。",
     review: "表现评估：保存记录、自动结算、ROI 和策略诊断。",
@@ -1361,9 +1377,34 @@ function snapshotRows() {
         <td>${snap ? badge(snap.final_decision) : "-"}<div class="muted">${oddsMissing ? "已生成基础快照，但不能计算 EV。" : ""}</div></td>
         <td>
           <button class="mini" data-action="create-pre-snapshot" data-match-id="${match.id}">生成当前快照</button>
+          <button class="mini" data-action="view-snapshot-history" data-match-id="${match.id}" data-match-label="${rankedTeam(match.home)} vs ${rankedTeam(match.away)}">查看历史</button>
           ${snap ? `<button class="mini" data-action="mark-final-snapshot" data-snapshot-id="${snap.id}">标记最终</button>` : ""}
           ${snap ? `<button class="mini" data-action="settle-pre-snapshot" data-snapshot-id="${snap.id}">赛后结算</button>` : ""}
         </td>
+      </tr>
+    `;
+  }).join("");
+}
+
+function snapshotHistoryRows() {
+  const rows = state.selectedSnapshotHistory || [];
+  if (!rows.length) {
+    return `<tr><td colspan="9" class="muted">尚未选择比赛，或该比赛暂无快照。点击表格中的“查看历史”。</td></tr>`;
+  }
+  return rows.map(item => {
+    const oddsMissing = !Array.isArray(item.odds_json) || item.odds_json.length === 0;
+    const evMissing = item.ev_json == null || !Array.isArray(item.ev_json) || item.ev_json.length === 0;
+    return `
+      <tr>
+        <td>${item.id}</td>
+        <td>${localDateTime(item.snapshot_time)}</td>
+        <td>${localDateTime(item.kickoff_time)}</td>
+        <td>${item.is_final_pre_match ? badge("final") : badge("普通")}</td>
+        <td>${item.created_before_kickoff ? "赛前" : "赛后"}</td>
+        <td>${oddsMissing ? "赔率缺失" : `${item.odds_json.length} 条`}</td>
+        <td>${evMissing ? "不能计算 EV" : `${item.ev_json.length} 条`}</td>
+        <td>${Number(item.data_quality_score || 0).toFixed(0)}分</td>
+        <td>${badge(item.final_decision || "-")}<div class="muted">${Array.isArray(item.risk_tags_json) ? item.risk_tags_json.join("；") : ""}</div></td>
       </tr>
     `;
   }).join("");
@@ -1556,6 +1597,13 @@ function preMatchSnapshotHtml() {
         <p class="muted">伤停或赔率数据未确认时，当前使用基础模型，相关玩法降级观察。以下为策略观察样本，仅用于模拟记录，不建议真实下注。</p>
         <div class="scroll-table">
           <table><thead><tr><th>编号</th><th>开赛</th><th>比赛</th><th>快照时间</th><th>类型</th><th>模型概率</th><th>赔率</th><th>EV</th><th>数据</th><th>伤停</th><th>决策</th><th>操作</th></tr></thead><tbody>${snapshotRows()}</tbody></table>
+        </div>
+      </section>
+      <section class="panel span-12 table-panel">
+        <h3>快照历史 ${state.selectedSnapshotMatchLabel ? `· ${state.selectedSnapshotMatchLabel}` : ""}</h3>
+        <p class="muted">点击上表“查看历史”后，这里会显示该比赛所有赛前快照。</p>
+        <div class="scroll-table">
+          <table><thead><tr><th>ID</th><th>快照时间</th><th>开赛时间</th><th>类型</th><th>生成口径</th><th>赔率</th><th>EV</th><th>数据质量</th><th>决策/风险</th></tr></thead><tbody>${snapshotHistoryRows()}</tbody></table>
         </div>
       </section>
       <section class="panel span-12 table-panel">
@@ -2306,8 +2354,9 @@ function viewHtml() {
   }
   if (state.view === "sim") return simHtml();
   if (state.view === "upset") return renderUpsetLabView(state);
+  if (state.view === "snapshots") return preMatchSnapshotHtml();
   if (state.view === "today") return todayPlanHtml();
-  if (state.view === "practical" || state.view === "snapshots" || state.view === "recommend" || state.view === "bankroll") {
+  if (state.view === "practical" || state.view === "recommend" || state.view === "bankroll") {
     state.view = "today";
     return todayPlanHtml();
   }
@@ -2558,6 +2607,7 @@ document.addEventListener("click", event => {
   if (action === "freeze-rec") safeRun("冻结赛前快照", freezeRecommendations);
   if (action === "collect-worldcup-snapshot") safeRun("赛前闭环采集", collectWorldcupSnapshot);
   if (action === "create-pre-snapshot") safeRun("生成当前快照", async () => createPreMatchSnapshot(event.target.dataset.matchId));
+  if (action === "view-snapshot-history") safeRun("查看快照历史", async () => viewSnapshotHistory(event.target.dataset.matchId, event.target.dataset.matchLabel));
   if (action === "create-today-pre-snapshots") safeRun("批量生成今日快照", createTodayPreMatchSnapshots);
   if (action === "audit-pre-snapshots") safeRun("运行快照审计", auditPreMatchSnapshots);
   if (action === "mark-final-snapshot") safeRun("标记最终快照", async () => markFinalPreMatchSnapshot(event.target.dataset.snapshotId));

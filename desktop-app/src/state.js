@@ -30,6 +30,8 @@ export const state = {
   systemStatus: null,
   startupHealth: null,
   preMatchSnapshots: [],
+  selectedSnapshotHistory: [],
+  selectedSnapshotMatchLabel: "",
   snapshotAuditLogs: [],
   snapshotDebug: null,
   livePaperSummary: null,

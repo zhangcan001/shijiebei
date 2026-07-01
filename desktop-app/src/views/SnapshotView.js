@@ -62,6 +62,7 @@ export function renderSnapshotView(state, helpers = {}) {
   const warningCount = audits.filter(item => item.severity === "warning" && !item.resolved).length;
   const live = state.livePaperSummary || {};
   const snapshotRows = helpers.snapshotRows || (() => defaultRows(12, "暂无快照数据。"));
+  const snapshotHistoryRows = helpers.snapshotHistoryRows || (() => defaultRows(9, "点击“查看历史”查看单场快照。"));
   const auditRows = helpers.auditRows || (() => defaultRows(7, "暂无审计记录。"));
   const livePaperRows = helpers.livePaperRows || (() => defaultRows(9, "暂无 live_pre_match 纸面交易。"));
   return `
@@ -96,6 +97,13 @@ export function renderSnapshotView(state, helpers = {}) {
         <p class="muted">伤停或赔率数据未确认时，当前使用基础模型，相关玩法降级观察。以下为策略观察样本，仅用于模拟记录，不建议真实下注。</p>
         <div class="scroll-table">
           <table><thead><tr><th>编号</th><th>开赛</th><th>比赛</th><th>快照时间</th><th>类型</th><th>模型概率</th><th>赔率</th><th>EV</th><th>数据</th><th>伤停</th><th>决策</th><th>操作</th></tr></thead><tbody>${snapshotRows()}</tbody></table>
+        </div>
+      </section>
+      <section class="panel span-12 table-panel">
+        <h3>快照历史 ${state.selectedSnapshotMatchLabel ? `· ${state.selectedSnapshotMatchLabel}` : ""}</h3>
+        <p class="muted">这里查看同一场比赛的所有快照，方便比较 latest / final / 赛前生成 / 赔率缺失等状态。</p>
+        <div class="scroll-table">
+          <table><thead><tr><th>ID</th><th>快照时间</th><th>开赛时间</th><th>类型</th><th>生成口径</th><th>赔率</th><th>EV</th><th>数据质量</th><th>决策/风险</th></tr></thead><tbody>${snapshotHistoryRows()}</tbody></table>
         </div>
       </section>
       <section class="panel span-12 table-panel">
