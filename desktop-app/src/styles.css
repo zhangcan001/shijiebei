@@ -282,6 +282,7 @@ th {
 .scroll-table {
   max-height: 620px;
   overflow: auto;
+  overflow-x: auto;
   max-width: 100%;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -388,6 +389,11 @@ th {
   word-break: break-word;
 }
 
+.wrap-text {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .source-page {
   max-width: 1480px;
   margin: 0 auto;
@@ -411,7 +417,7 @@ th {
 .source-health-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 12px;
+  gap: 14px;
 }
 
 .source-card {

@@ -24,7 +24,7 @@ function providerCard(provider) {
   const healthKind = health.includes("正常") ? "good" : health.includes("错误") || health.includes("缺失") ? "bad" : "warn";
   return `
     <section class="source-card">
-      <div class="source-card-head">
+      <div class="card-head source-card-head">
         <div>
           <h3>${providerKind(provider)}</h3>
           <p class="muted">${safe(provider.provider_id)}</p>
@@ -32,18 +32,18 @@ function providerCard(provider) {
         ${badge(provider.enabled ? "启用" : "禁用", provider.enabled ? "good" : "warn")}
       </div>
       <div class="source-kv"><span>Key</span><strong>${keyState}</strong></div>
-      <div class="source-kv"><span>Base URL</span><strong>${safe(provider.base_url || provider.url || provider.endpoint || "内置/缓存")}</strong></div>
+      <div class="source-kv"><span>Base URL</span><strong class="wrap-text">${safe(provider.base_url || provider.url || provider.endpoint || "内置/缓存")}</strong></div>
       <div class="source-kv"><span>今日请求</span><strong>${provider.today_requests || 0} / ${provider.daily_limit || "不限"}</strong></div>
       <div class="source-kv"><span>剩余额度</span><strong>${provider.daily_limit ? Math.max(0, Number(provider.daily_limit || 0) - Number(provider.today_requests || 0)) : "不限"}</strong></div>
       <div class="source-kv"><span>最近成功</span><strong>${safe(provider.last_success_at)}</strong></div>
-      <div class="source-kv"><span>最近错误</span><strong>${safe(provider.last_error_message)}</strong></div>
+      <div class="source-kv"><span>最近错误</span><strong class="wrap-text">${safe(provider.last_error_message)}</strong></div>
       <div class="source-kv"><span>健康</span><strong>${badge(health, healthKind)}</strong></div>
       ${needsKey ? `<input id="provider-key-${provider.provider_id}" type="password" autocomplete="off" placeholder="${provider.key_configured ? "已配置，输入新 Key 可覆盖" : "输入 API Key"}">` : ""}
       <div class="source-actions">
-        ${needsKey ? `<button class="mini" data-action="save-provider-key" data-provider="${provider.provider_id}">保存Key</button><button class="mini danger" data-action="clear-provider-key" data-provider="${provider.provider_id}">清Key</button>` : ""}
-        <button class="mini" data-action="test-provider" data-provider="${provider.provider_id}">测试</button>
-        <button class="mini" data-action="toggle-provider" data-provider="${provider.provider_id}" data-enabled="${provider.enabled ? "false" : "true"}">${provider.enabled ? "禁用" : "启用"}</button>
-        <button class="mini danger" data-action="clear-provider-cache" data-provider="${provider.provider_id}">清缓存</button>
+        ${needsKey ? `<button class="mini" data-action="save-provider-key" data-provider-id="${provider.provider_id}">保存Key</button><button class="mini danger" data-action="clear-provider-key" data-provider-id="${provider.provider_id}">清Key</button>` : ""}
+        <button class="mini" data-action="test-source" data-provider-id="${provider.provider_id}">测试</button>
+        <button class="mini" data-action="toggle-source" data-provider-id="${provider.provider_id}" data-enabled="${provider.enabled ? "false" : "true"}">${provider.enabled ? "禁用" : "启用"}</button>
+        <button class="mini danger" data-action="clear-source-cache" data-provider-id="${provider.provider_id}">清缓存</button>
       </div>
     </section>
   `;
@@ -116,9 +116,9 @@ export function renderSourceView(state) {
           <p class="muted">当前数据状态：${state.status ? "已加载" : "等待加载"} · 最近刷新：${refresh.lastHealthAt || refresh.lastGlobalAt || "-"}</p>
         </div>
         <div class="source-actions">
-          <button class="btn" data-action="refresh-external">全局刷新</button>
+          <button class="btn" data-action="global-refresh">全局刷新</button>
           <button class="btn secondary" data-action="save-external">保存配置</button>
-          <button class="btn secondary" data-action="create-today-pre-snapshots">生成今日快照</button>
+          <button class="btn secondary" data-action="create-today-pre-match-snapshots">生成今日快照</button>
           <button class="btn ghost" data-action="open-backup-dir">打开备份目录</button>
         </div>
       </section>
@@ -140,8 +140,8 @@ export function renderSourceView(state) {
           <button class="btn secondary" data-action="refresh-core">同步赔率</button>
           <button class="btn secondary" data-action="refresh-results">同步赛果</button>
           <button class="btn secondary" data-action="refresh-sporttery-injury">同步伤停/首发</button>
-          <button class="btn" data-action="refresh-external">全局刷新</button>
-          <button class="btn secondary" data-action="create-today-pre-snapshots">生成今日快照</button>
+          <button class="btn" data-action="global-refresh">全局刷新</button>
+          <button class="btn secondary" data-action="create-today-pre-match-snapshots">生成今日快照</button>
           <button class="btn ghost" data-action="open-backup-dir">打开备份目录</button>
         </div>
         ${oddsMissing ? `<p class="muted">赔率缺失，EV、赔率异动、冷门实验室和纸面交易将受影响。</p>` : ""}

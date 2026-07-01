@@ -2608,7 +2608,7 @@ document.addEventListener("click", event => {
   if (action === "collect-worldcup-snapshot") safeRun("赛前闭环采集", collectWorldcupSnapshot);
   if (action === "create-pre-snapshot") safeRun("生成当前快照", async () => createPreMatchSnapshot(event.target.dataset.matchId));
   if (action === "view-snapshot-history") safeRun("查看快照历史", async () => viewSnapshotHistory(event.target.dataset.matchId, event.target.dataset.matchLabel));
-  if (action === "create-today-pre-snapshots") safeRun("批量生成今日快照", createTodayPreMatchSnapshots);
+  if (action === "create-today-pre-snapshots" || action === "create-today-pre-match-snapshots") safeRun("批量生成今日快照", createTodayPreMatchSnapshots);
   if (action === "audit-pre-snapshots") safeRun("运行快照审计", auditPreMatchSnapshots);
   if (action === "mark-final-snapshot") safeRun("标记最终快照", async () => markFinalPreMatchSnapshot(event.target.dataset.snapshotId));
   if (action === "settle-pre-snapshot") safeRun("赛后结算快照", async () => settlePreMatchSnapshot(event.target.dataset.snapshotId));
@@ -2632,19 +2632,19 @@ document.addEventListener("click", event => {
   if (action === "save-bankroll") safeRun("保存资金设置", saveBankroll);
   if (action === "save-external") safeRun("保存外部源", saveExternalConfig);
   if (action === "refresh-sporttery-injury") safeRun("刷新竞彩网伤停", refreshSportteryInjuries);
-  if (action === "refresh-external") safeRun("刷新外部源", refreshExternalSources);
+  if (action === "refresh-external" || action === "global-refresh") safeRun("刷新外部源", refreshExternalSources);
   if (action === "probe-injury") safeRun("测试伤停源", async () => probeExternal(document.querySelector("#injury-url")?.value || ""));
   if (action === "probe-lineup") safeRun("测试首发源", async () => probeExternal(document.querySelector("#lineup-url")?.value || ""));
   if (action === "probe-stats") safeRun("测试统计源", async () => probeExternal(document.querySelector("#stats-url")?.value || ""));
   if (action === "save-provider-key") {
-    const providerId = event.target.dataset.provider;
+    const providerId = event.target.dataset.providerId || event.target.dataset.provider;
     const apiKey = document.querySelector(`#provider-key-${providerId}`)?.value || "";
     safeRun("保存 Provider Key", async () => saveProviderCredential(providerId, apiKey));
   }
-  if (action === "clear-provider-key") safeRun("清除 Provider Key", async () => clearProviderCredential(event.target.dataset.provider));
-  if (action === "test-provider") safeRun("测试 Provider", async () => testProvider(event.target.dataset.provider));
-  if (action === "toggle-provider") safeRun("切换 Provider", async () => toggleProvider(event.target.dataset.provider, event.target.dataset.enabled === "true"));
-  if (action === "clear-provider-cache") safeRun("清除 Provider 缓存", async () => clearProviderCache(event.target.dataset.provider));
+  if (action === "clear-provider-key") safeRun("清除 Provider Key", async () => clearProviderCredential(event.target.dataset.providerId || event.target.dataset.provider));
+  if (action === "test-provider" || action === "test-source") safeRun("测试 Provider", async () => testProvider(event.target.dataset.providerId || event.target.dataset.provider));
+  if (action === "toggle-provider" || action === "toggle-source") safeRun("切换 Provider", async () => toggleProvider(event.target.dataset.providerId || event.target.dataset.provider, event.target.dataset.enabled === "true"));
+  if (action === "clear-provider-cache" || action === "clear-source-cache") safeRun("清除 Provider 缓存", async () => clearProviderCache(event.target.dataset.providerId || event.target.dataset.provider));
   if (action === "run-training-pipeline") safeRun("自动下载训练数据并训练", runTrainingPipeline);
   if (action === "save-model") safeRun("保存模型阈值", saveModelSettings);
   if (action === "auto-tune") safeRun("自动调权", autoTuneModel);

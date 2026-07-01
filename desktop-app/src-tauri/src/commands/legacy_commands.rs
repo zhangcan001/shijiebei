@@ -6816,8 +6816,18 @@ fn kickoff_is_future(kickoff_time: &str, snapshot_time: &str) -> bool {
     }
 }
 
-fn pre_match_snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PreMatchSnapshotRow> {
-    let settlement_text: Option<String> = row.get(33)?;
+const PRE_MATCH_SNAPSHOT_SELECT: &str = "s.id, s.match_id, s.external_fixture_id, s.provider_match_id, s.snapshot_time, s.kickoff_time,
+                s.home_team, s.away_team, s.competition, s.season, s.stage, s.model_version,
+                s.model_probs_json, s.calibrated_probs_json, s.worldcup_correction_action,
+                s.odds_json, s.market_probs_json, s.ev_json, s.data_quality_score,
+                s.lineup_status, s.lineup_confidence, s.injury_status, s.injury_confidence,
+                s.risk_tags_json, s.final_decision, s.decision_reason_json, s.paper_strategy_id,
+                s.paper_trade_enabled, s.raw_features_json, s.created_before_kickoff, s.is_final_pre_match, s.created_at, s.updated_at";
+
+const PRE_MATCH_SNAPSHOT_SELECT_COUNT: usize = 33;
+
+fn map_pre_match_snapshot(row: &rusqlite::Row<'_>) -> rusqlite::Result<PreMatchSnapshotRow> {
+    let is_final_pre_match = row.get::<_, i64>(30)? != 0;
     Ok(PreMatchSnapshotRow {
         id: row.get(0)?,
         match_id: row.get(1)?,
@@ -6849,22 +6859,26 @@ fn pre_match_snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PreM
         paper_trade_enabled: row.get::<_, i64>(27)? != 0,
         raw_features_json: parse_json_text(row.get(28)?),
         created_before_kickoff: row.get::<_, i64>(29)? != 0,
-        is_final_pre_match: row.get::<_, i64>(30)? != 0,
+        is_final_pre_match,
+        is_final_snapshot: is_final_pre_match,
         created_at: row.get(31)?,
         updated_at: row.get(32)?,
-        settlement: settlement_text.map(parse_json_text),
+        settlement: None,
     })
+}
+
+fn map_pre_match_snapshot_with_settlement(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<PreMatchSnapshotRow> {
+    let mut snapshot = map_pre_match_snapshot(row)?;
+    let settlement_text: Option<String> = row.get(PRE_MATCH_SNAPSHOT_SELECT_COUNT)?;
+    snapshot.settlement = settlement_text.map(parse_json_text);
+    Ok(snapshot)
 }
 
 fn pre_match_snapshot_select_sql(where_clause: &str) -> String {
     format!(
-        "select s.id, s.match_id, s.external_fixture_id, s.provider_match_id, s.snapshot_time, s.kickoff_time,
-                s.home_team, s.away_team, s.competition, s.season, s.stage, s.model_version,
-                s.model_probs_json, s.calibrated_probs_json, s.worldcup_correction_action,
-                s.odds_json, s.market_probs_json, s.ev_json, s.data_quality_score,
-                s.lineup_status, s.lineup_confidence, s.injury_status, s.injury_confidence,
-                s.risk_tags_json, s.final_decision, s.decision_reason_json, s.paper_strategy_id,
-                s.paper_trade_enabled, s.raw_features_json, s.created_before_kickoff, s.is_final_pre_match, s.created_at, s.updated_at,
+        "select {PRE_MATCH_SNAPSHOT_SELECT},
                 (select json_object('home_score', r.home_score, 'away_score', r.away_score, 'result_spf', r.result_spf,
                                     'total_goals', r.total_goals, 'settled_at', r.settled_at,
                                     'is_hit_json', r.is_hit_json, 'paper_profit_json', r.paper_profit_json,
@@ -7116,7 +7130,9 @@ async fn create_pre_match_snapshot(app: AppHandle, match_id: String) -> Result<V
     let sql = pre_match_snapshot_select_sql("where s.id=?1");
     let snapshot = conn
         .prepare(&sql)
-        .and_then(|mut stmt| stmt.query_row(params![snapshot_id], pre_match_snapshot_from_row))
+        .and_then(|mut stmt| {
+            stmt.query_row(params![snapshot_id], map_pre_match_snapshot_with_settlement)
+        })
         .map_err(snapshot_mapping_error)?;
     Ok(json!({
         "ok": true,
@@ -7174,7 +7190,7 @@ async fn load_pre_match_snapshots(app: AppHandle) -> Result<Vec<PreMatchSnapshot
     let sql = pre_match_snapshot_select_sql("");
     let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
     let rows = stmt
-        .query_map([], pre_match_snapshot_from_row)
+        .query_map([], map_pre_match_snapshot_with_settlement)
         .map_err(|error| error.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(snapshot_mapping_error)
@@ -7214,7 +7230,7 @@ async fn get_match_snapshot_history(
     let sql = pre_match_snapshot_select_sql("where s.match_id=?1");
     let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
     let rows = stmt
-        .query_map(params![match_id], pre_match_snapshot_from_row)
+        .query_map(params![match_id], map_pre_match_snapshot_with_settlement)
         .map_err(|error| error.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(snapshot_mapping_error)
@@ -7261,7 +7277,7 @@ async fn debug_snapshot_schema(app: AppHandle) -> Result<Value, String> {
         let sql = pre_match_snapshot_select_sql("");
         let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
         let rows = stmt
-            .query_map([], pre_match_snapshot_from_row)
+            .query_map([], map_pre_match_snapshot_with_settlement)
             .map_err(|error| error.to_string())?;
         rows.take(3)
             .collect::<Result<Vec<_>, _>>()
@@ -7298,6 +7314,8 @@ async fn debug_snapshot_schema(app: AppHandle) -> Result<Value, String> {
         "expected_columns": expected_columns,
         "missing_columns": missing_columns,
         "extra_columns": extra_columns,
+        "select_column_count": PRE_MATCH_SNAPSHOT_SELECT_COUNT,
+        "mapper_expected_count": PRE_MATCH_SNAPSHOT_SELECT_COUNT,
         "migration_status": if added_columns.is_empty() { "no_change" } else { "columns_added" },
         "added_columns": added_columns,
         "latest_3_snapshots": latest_3_snapshots,
@@ -7551,7 +7569,7 @@ async fn audit_pre_match_snapshots(app: AppHandle) -> Result<Value, String> {
         let sql = pre_match_snapshot_select_sql("");
         let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
         let rows = stmt
-            .query_map([], pre_match_snapshot_from_row)
+            .query_map([], map_pre_match_snapshot_with_settlement)
             .map_err(|error| error.to_string())?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())?
@@ -11926,6 +11944,57 @@ mod tests {
     }
 
     #[test]
+    fn pre_match_snapshot_mapper_uses_fixed_33_columns() {
+        assert_eq!(PRE_MATCH_SNAPSHOT_SELECT_COUNT, 33);
+        let conn = Connection::open_in_memory().unwrap();
+        let snapshot = conn
+            .query_row(
+                "select
+                 1, 'm1', 'fx1', 'pm1', '2026-06-30T10:00:00Z', '2026-06-30T12:00:00Z',
+                 '主队', '客队', '世界杯', '2026', '淘汰赛', 'model-v1',
+                 '[]', '[]', 'none', '[]', '[]', 'null', 66.0,
+                 'unknown', 0.0, 'unknown', 0.0, '[]', 'observe_only', '[]',
+                 'candidate_strategy_v1', 0, '{}', 1, 1, '2026-06-30T10:00:00Z', '2026-06-30T10:00:00Z'",
+                [],
+                map_pre_match_snapshot,
+            )
+            .unwrap();
+        assert_eq!(snapshot.id, 1);
+        assert!(snapshot.is_final_pre_match);
+        assert_eq!(snapshot.is_final_snapshot, snapshot.is_final_pre_match);
+        assert_eq!(snapshot.odds_json, json!([]));
+        assert_eq!(snapshot.ev_json, Value::Null);
+    }
+
+    #[test]
+    fn debug_snapshot_schema_contract_mentions_expected_counts() {
+        let source = include_str!("legacy_commands.rs");
+        assert!(source.contains("debug_snapshot_schema"));
+        assert!(source.contains("\"expected_columns\""));
+        assert!(source.contains("\"missing_columns\""));
+        assert!(source.contains("\"select_column_count\""));
+        assert!(source.contains("\"mapper_expected_count\""));
+    }
+
+    #[test]
+    fn source_view_is_real_html_layout_with_safe_actions() {
+        let source = include_str!("../../../src/views/SourceView.js");
+        assert!(!source.contains("### 数据源管理"));
+        assert!(source.contains("section class=\"panel"));
+        assert!(source.contains("source-grid"));
+        assert!(source.contains("scroll-table"));
+        assert!(source.contains("data-action=\"global-refresh\""));
+        assert!(source.contains("data-action=\"create-today-pre-match-snapshots\""));
+        assert!(source.contains("data-action=\"test-source\""));
+        assert!(source.contains("data-provider-id"));
+        assert!(source.contains("尚未配置外部数据源"));
+        assert!(source.contains("API-Football 未配置"));
+        assert!(source.contains("赔率缺失"));
+        assert!(!source.contains("api_key"));
+        assert!(!source.contains("apiKey"));
+    }
+
+    #[test]
     fn result_csv_import_skips_invalid_rows() {
         let csv = "home,away,score,stage,status,half_score\n法国,德国,2:1,世界杯,完场,1:0\n空队,坏行,abc,世界杯,完场,";
         let rows = parse_results_csv(csv).unwrap();
@@ -12995,6 +13064,7 @@ mod tests {
                 raw_features_json: json!({}),
                 created_before_kickoff: true,
                 is_final_pre_match: false,
+                is_final_snapshot: false,
                 created_at: String::new(),
                 updated_at: String::new(),
                 settlement: None,
@@ -13004,6 +13074,7 @@ mod tests {
                 match_id: "m1".to_string(),
                 snapshot_time: "2026-06-29T09:00:00Z".to_string(),
                 is_final_pre_match: true,
+                is_final_snapshot: true,
                 external_fixture_id: String::new(),
                 provider_match_id: String::new(),
                 kickoff_time: String::new(),
@@ -13075,6 +13146,7 @@ mod tests {
             paper_trade_enabled: false,
             raw_features_json: json!({}),
             created_before_kickoff: true,
+            is_final_snapshot: false,
             created_at: String::new(),
             updated_at: String::new(),
             settlement: None,
@@ -13092,6 +13164,7 @@ mod tests {
                 match_id: "m3".to_string(),
                 snapshot_time: "2026-06-29T12:00:00Z".to_string(),
                 is_final_pre_match: false,
+                is_final_snapshot: false,
                 external_fixture_id: String::new(),
                 provider_match_id: String::new(),
                 kickoff_time: "2026-06-30 01:00:00".to_string(),
@@ -13128,6 +13201,7 @@ mod tests {
                 match_id: "m3".to_string(),
                 snapshot_time: "2026-06-29T10:00:00Z".to_string(),
                 is_final_pre_match: true,
+                is_final_snapshot: true,
                 external_fixture_id: String::new(),
                 provider_match_id: String::new(),
                 kickoff_time: "2026-06-30 01:00:00".to_string(),
@@ -13438,6 +13512,7 @@ mod tests {
             paper_trade_enabled: false,
             raw_features_json: json!({}),
             created_before_kickoff: true,
+            is_final_snapshot: true,
             created_at: String::new(),
             updated_at: String::new(),
             settlement: None,
