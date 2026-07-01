@@ -8277,12 +8277,78 @@ fn normalize_stage_for_export(raw_stage: &str, kickoff: &str, competition: &str)
     if !invalid {
         return (raw.to_string(), true);
     }
+    if let Some(inferred) = infer_worldcup_stage_from_date(kickoff) {
+        return (inferred.to_string(), false);
+    }
     let context = format!("{} {}", competition, kickoff).to_ascii_lowercase();
     if context.contains("world") || competition.contains("世界杯") || kickoff.starts_with("2026-")
     {
         ("淘汰赛（待确认轮次）".to_string(), false)
     } else {
         ("待确认".to_string(), false)
+    }
+}
+
+fn infer_worldcup_stage_from_date(kickoff: &str) -> Option<&'static str> {
+    let date = kickoff.get(0..10)?;
+    match date {
+        "2026-06-28" | "2026-06-29" | "2026-06-30" | "2026-07-01" | "2026-07-02" | "2026-07-03" => {
+            Some("1/16决赛")
+        }
+        "2026-07-04" | "2026-07-05" | "2026-07-06" | "2026-07-07" => Some("1/8决赛"),
+        "2026-07-09" | "2026-07-10" | "2026-07-11" => Some("1/4决赛"),
+        "2026-07-14" | "2026-07-15" => Some("半决赛"),
+        "2026-07-19" => Some("决赛"),
+        _ => None,
+    }
+}
+
+fn final_snapshot_reason(snapshot: Option<&PreMatchSnapshotRow>) -> &'static str {
+    let Some(snapshot) = snapshot else {
+        return "无快照";
+    };
+    if !snapshot.created_before_kickoff {
+        return "赛后快照不可标记";
+    }
+    if snapshot.is_final_pre_match {
+        return "临场自动标记";
+    }
+    match (
+        parse_time_as_utc(&snapshot.kickoff_time),
+        parse_time_as_utc(&snapshot.snapshot_time),
+    ) {
+        (Some(kickoff), Some(snapshot_time)) => {
+            let seconds = (kickoff - snapshot_time).num_seconds();
+            if seconds > 6 * 3600 {
+                "距离开赛较远"
+            } else if seconds >= 0 {
+                "未标记 final，建议复查"
+            } else {
+                "赛后快照不可标记"
+            }
+        }
+        _ => "时间无法判断",
+    }
+}
+
+fn final_auto_mark_allowed(
+    snapshot: &PreMatchSnapshotRow,
+    now: DateTime<Utc>,
+) -> (bool, &'static str) {
+    if !snapshot.created_before_kickoff {
+        return (false, "赛后快照不可标记");
+    }
+    let Some(kickoff) = parse_time_as_utc(&snapshot.kickoff_time) else {
+        return (false, "开赛时间无法判断");
+    };
+    let seconds_to_kickoff = (kickoff - now).num_seconds();
+    if seconds_to_kickoff < 0 {
+        return (false, "赛后快照不可标记");
+    }
+    if seconds_to_kickoff <= 6 * 3600 {
+        (true, "临场自动标记")
+    } else {
+        (false, "距离开赛较远，仅普通快照")
     }
 }
 
@@ -9291,20 +9357,75 @@ fn build_gpt_analysis_package_markdown(
     };
     let raw_odds_text = if include_raw_odds {
         snapshot
-            .map(|item| compact_json_top(&item.odds_json, 20))
+            .map(|item| {
+                if json_has_content(&item.odds_json) {
+                    format!(
+                        "已截断，仅展示关键赔率。完整数据请在软件查看：{}",
+                        compact_json_top(&item.odds_json, 5)
+                    )
+                } else {
+                    "-".to_string()
+                }
+            })
             .unwrap_or_else(|| "-".to_string())
     } else {
         "未导出 raw_odds。".to_string()
     };
-    let missing_fields = if has_odds {
-        Vec::<&str>::new()
+    let data_quality = snapshot
+        .map(|item| item.data_quality_score)
+        .unwrap_or_else(|| {
+            recommendations
+                .first()
+                .map(|item| item.data_score)
+                .unwrap_or(0.0)
+        });
+    let model_complete = analysis.is_some() || snapshot_has_model_probs(snapshot);
+    let mut missing_fields = Vec::<String>::new();
+    if !has_odds {
+        missing_fields.push("odds 缺失".to_string());
+        missing_fields.push("market_prob 缺失".to_string());
+        missing_fields.push("ev 缺失".to_string());
+    }
+    if !model_complete {
+        missing_fields.push("model 缺失".to_string());
+    }
+    if snapshot
+        .map(|item| item.lineup_status.to_ascii_lowercase().contains("unknown"))
+        .unwrap_or(true)
+    {
+        missing_fields.push("lineup unknown".to_string());
+    }
+    if snapshot
+        .map(|item| item.injury_status.to_ascii_lowercase().contains("unknown"))
+        .unwrap_or(true)
+    {
+        missing_fields.push("injury unknown".to_string());
+    }
+    if !snapshot
+        .map(|item| item.is_final_pre_match)
+        .unwrap_or(false)
+    {
+        missing_fields.push("final snapshot 否".to_string());
+    }
+    if recommendations
+        .iter()
+        .any(|item| item.risk_factors.contains("xG") || item.risk_factors.contains("统计"))
+    {
+        missing_fields.push("xG 缺失".to_string());
+    }
+    missing_fields.sort();
+    missing_fields.dedup();
+    let low_quality_warning = if data_quality < 65.0 {
+        "⚠ 数据质量偏低，仅供观察，不建议作为主要判断依据。"
     } else {
-        vec!["odds", "market_prob", "ev"]
+        ""
     };
     let data_advice = recommendations
         .first()
         .map(|item| item.quality_action.clone())
-        .unwrap_or_else(|| "仅可作为基础资料，建议人工确认。".to_string());
+        .unwrap_or_else(|| "仅可作为基础资料，建议人工确认。".to_string())
+        .replace("可进入正式推荐", "数据质量较完整，可供人工复核")
+        .replace("可小注", "数据质量较完整，可供人工复核");
     let observe_directions = recommendations
         .iter()
         .filter(|item| item.decision != "禁止")
@@ -9334,7 +9455,6 @@ fn build_gpt_analysis_package_markdown(
                 .map(|item| value_market_count(&item.market_probs_json))
                 .unwrap_or(0),
         );
-    let model_complete = analysis.is_some() || snapshot_has_model_probs(snapshot);
     let odds_completeness = if !has_odds {
         "缺失"
     } else if recommendations.is_empty() {
@@ -9372,6 +9492,10 @@ fn build_gpt_analysis_package_markdown(
 * 模拟信息：{simulation_status}
 * 阶段字段：{stage_status}
 * 主要缺失项：{missing_fields}
+* 是否 final snapshot：{is_final_snapshot}
+* final snapshot 原因：{final_snapshot_reason}
+
+{low_quality_warning}
 
 > 数据源合并提示：{merge_note}
 
@@ -9388,6 +9512,7 @@ fn build_gpt_analysis_package_markdown(
 * 是否中立场：世界杯默认中立/赛会制，需人工确认实际场地。
 * 快照状态：{frozen_note}
 * 是否 final snapshot：{is_final_snapshot}
+* final snapshot 原因：{final_snapshot_reason}
 * 是否赛前生成：{created_before_kickoff}
 * 数据质量分：{data_quality:.0}
 
@@ -9404,7 +9529,7 @@ fn build_gpt_analysis_package_markdown(
 * 最近快照时间：{latest_odds_time}
 * 赔率变化总摘要：{movement_summary}
 * 快照不足提示：{snapshot_warning}
-* raw_odds_summary（Top 20）：{raw_odds_text}
+* raw_odds_summary：{raw_odds_text}
 * 盘口/EV 摘要：{snapshot_ev}
 
 ## 3. 模型输出
@@ -9444,7 +9569,7 @@ fn build_gpt_analysis_package_markdown(
 ## 6. 软件建议
 
 * 模型倾向：{top_recommendation}
-* 数据建议：{data_advice}
+* 数据质量：{data_advice}
 * 观察方向：{observe_directions}
 * 禁买方向：{banned_directions}
 * 仓位参考：仅作为风险控制参考，不是自动投注指令。
@@ -9509,12 +9634,8 @@ fn build_gpt_analysis_package_markdown(
         model_version = snapshot
             .map(|item| item.model_version.as_str())
             .unwrap_or("rules-dixon-coles-v1"),
-        data_quality = snapshot
-            .map(|item| item.data_quality_score)
-            .unwrap_or_else(|| recommendations
-                .first()
-                .map(|item| item.data_score)
-                .unwrap_or(0.0)),
+        data_quality = data_quality,
+        final_snapshot_reason = final_snapshot_reason(snapshot),
         fallback = if analysis.is_some() {
             "否/有模型分析"
         } else {
@@ -9560,6 +9681,7 @@ fn build_gpt_analysis_package_markdown(
         } else {
             missing_fields.join("、")
         },
+        low_quality_warning = low_quality_warning,
         dedupe_status = dedupe_status,
         snapshot_selection_status = snapshot_selection_status,
         merged_source_count = merged_source_count,
@@ -9682,9 +9804,90 @@ async fn build_gpt_analysis_package(
         "has_snapshot": snapshot.is_some(),
         "is_final_snapshot": snapshot.map(|item| item.is_final_pre_match).unwrap_or(false),
         "has_odds": recs.iter().any(|item| item.odds > 1.0) || snapshot_has_odds(snapshot),
+        "has_model_probs": analysis.is_some() || snapshot_has_model_probs(snapshot),
+        "has_simulation": analysis.map(|item| item.lambda_home > 0.0 && item.lambda_away > 0.0).unwrap_or(false),
+        "data_quality": snapshot.map(|item| item.data_quality_score).unwrap_or_else(|| recs.first().map(|item| item.data_score).unwrap_or(0.0)),
         "odds_snapshot_count": odds_snapshot_count_for_match(&conn, &match_id),
         "warning": if snapshot.is_none() { "无赛前快照，已导出非冻结基础分析包。" } else { "" }
     }))
+}
+
+fn gpt_today_overview_markdown(packages: &[Value]) -> String {
+    let match_count = packages.len();
+    let deduped_count = packages
+        .iter()
+        .filter(|item| {
+            item.get("merged_source_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(1)
+                > 1
+        })
+        .count();
+    let final_count = packages
+        .iter()
+        .filter(|item| {
+            item.get("is_final_snapshot")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .count();
+    let odds_count = packages
+        .iter()
+        .filter(|item| {
+            item.get("has_odds")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .count();
+    let model_count = packages
+        .iter()
+        .filter(|item| {
+            item.get("has_model_probs")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .count();
+    let simulation_count = packages
+        .iter()
+        .filter(|item| {
+            item.get("has_simulation")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .count();
+    let low_quality = packages
+        .iter()
+        .filter(|item| {
+            item.get("data_quality")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0)
+                < 65.0
+        })
+        .count();
+    let revisit = packages
+        .iter()
+        .filter(|item| {
+            !item
+                .get("is_final_snapshot")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .count();
+    format!(
+        r#"# 今日 GPT 赛前分析包总览
+
+- 比赛数量：{match_count}
+- 已去重比赛数：{deduped_count}
+- final snapshot 数量：{final_count}
+- 赔率完整比赛数：{odds_count}
+- 模型完整比赛数：{model_count}
+- 模拟完整比赛数：{simulation_count}
+- 数据质量低于 65 的比赛：{low_quality}
+- 需要临场复查的比赛：{revisit}
+
+---
+"#
+    )
 }
 
 #[tauri::command]
@@ -9745,10 +9948,11 @@ async fn gpt_today_analysis_packages(app: AppHandle) -> Result<Value, String> {
         }
         packages.push(package);
     }
+    let overview = gpt_today_overview_markdown(&packages);
     Ok(json!({
         "count": packages.len(),
         "packages": packages,
-        "markdown": markdowns.join("\n\n---\n\n"),
+        "markdown": format!("{}{}", overview, markdowns.join("\n\n---\n\n")),
         "message": if markdowns.is_empty() { "今日暂无可导出的未开赛比赛。" } else { "今日 GPT 分析包已生成。" }
     }))
 }
@@ -9936,6 +10140,7 @@ async fn export_gpt_today_packages(
         }
     } else {
         let mut markdowns = Vec::new();
+        let mut packages = Vec::new();
         for item in &open_matches {
             let package = build_gpt_analysis_package(
                 app.clone(),
@@ -9966,7 +10171,9 @@ async fn export_gpt_today_packages(
             if let Some(markdown) = package.get("markdown").and_then(Value::as_str) {
                 markdowns.push(markdown.to_string());
             }
+            packages.push(package);
         }
+        let overview = gpt_today_overview_markdown(&packages);
         let duplicate_warning = if duplicate_keys.is_empty() {
             String::new()
         } else {
@@ -9978,7 +10185,12 @@ async fn export_gpt_today_packages(
         let path = unique_markdown_path(&dir, &format!("GPT赛前分析包_{}_全部比赛", date));
         fs::write(
             &path,
-            format!("{}{}", duplicate_warning, markdowns.join("\n\n---\n\n")),
+            format!(
+                "{}{}{}",
+                duplicate_warning,
+                overview,
+                markdowns.join("\n\n---\n\n")
+            ),
         )
         .map_err(|error| error.to_string())?;
         files.push(path.to_string_lossy().to_string());
@@ -10563,15 +10775,40 @@ async fn run_one_click_gpt_package_pipeline(
                     }));
                 }
                 let snapshots = load_pre_match_snapshots(app.clone()).await.unwrap_or_default();
+                let now = Utc::now();
                 let ids = if created_snapshot_ids.is_empty() {
                     snapshots
                         .iter()
-                        .filter(|item| item.created_before_kickoff)
+                        .filter(|item| final_auto_mark_allowed(item, now).0)
                         .map(|item| item.id)
                         .collect::<Vec<_>>()
                 } else {
-                    created_snapshot_ids.clone()
+                    created_snapshot_ids
+                        .iter()
+                        .copied()
+                        .filter(|snapshot_id| {
+                            snapshots
+                                .iter()
+                                .find(|item| item.id == *snapshot_id)
+                                .map(|item| final_auto_mark_allowed(item, now).0)
+                                .unwrap_or(false)
+                        })
+                        .collect::<Vec<_>>()
                 };
+                let skipped_far = snapshots
+                    .iter()
+                    .filter(|item| {
+                        let (allowed, reason) = final_auto_mark_allowed(item, now);
+                        !allowed && reason == "距离开赛较远，仅普通快照"
+                    })
+                    .count();
+                let skipped_after = snapshots
+                    .iter()
+                    .filter(|item| {
+                        let (allowed, reason) = final_auto_mark_allowed(item, now);
+                        !allowed && reason == "赛后快照不可标记"
+                    })
+                    .count();
                 let mut marked = 0usize;
                 let mut failed = 0usize;
                 for snapshot_id in ids {
@@ -10582,7 +10819,7 @@ async fn run_one_click_gpt_package_pipeline(
                 }
                 Ok(json!({
                     "status": if failed > 0 { "warning" } else if marked == 0 { "skipped" } else { "success" },
-                    "message": format!("标记 final {} 条，失败 {} 条。", marked, failed)
+                    "message": format!("标记 final {} 条，失败 {} 条；距离开赛较远 {} 条；赛后不可标记 {} 条。", marked, failed, skipped_far, skipped_after)
                 }))
             },
         )
@@ -17119,7 +17356,7 @@ mod tests {
         );
         assert!(!markdown.contains("* 阶段：TIMED"));
         assert!(!markdown.contains("Selling"));
-        assert!(markdown.contains("* 阶段：淘汰赛（待确认轮次）"));
+        assert!(markdown.contains("* 阶段：1/16决赛"));
         assert!(markdown.contains("赔率原始数据存在，但结构化表格未完全解析"));
         assert!(markdown.contains("* 去重状态：已去重"));
         assert!(markdown.contains("* 快照选择：已选择最佳快照"));
@@ -17202,9 +17439,106 @@ mod tests {
         );
         assert!(markdown.contains("* 赔率快照次数：2"));
         assert!(markdown.contains("* 赔率记录条数：3"));
-        assert!(markdown.contains("仅展示前20条，完整数据请看软件。"));
+        assert!(markdown.contains("raw_odds_summary：已截断，仅展示关键赔率"));
+        assert!(markdown.contains("仅展示前5条，完整数据请看软件。"));
+        assert!(!markdown.contains("仅展示前20条"));
         assert!(markdown.contains("| 主胜 | 1.80 | 55.00% | 62.00% | +11.60% | 降赔 -2.00% |"));
         assert!(!markdown.contains("| 平局 | 3.60 | 25.00% | 23.00% | -17.20% | 降赔 -2.00% |"));
+    }
+
+    #[test]
+    fn gpt_export_low_quality_warning_and_safe_quality_wording() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "create table odds_snapshots(id integer, match_id text, created_at text);
+             create table odds_movements(id integer, match_id text, market text, pick text, direction text, delta_pct real);",
+        )
+        .unwrap();
+        let match_row = test_match_row("2040352", "英格兰", "刚果金");
+        let analysis = test_analysis("2040352");
+        let mut rec = test_recommendation("2040352");
+        rec.quality_action = "可进入正式推荐".to_string();
+        let mut snapshot = test_snapshot(
+            "2040352",
+            json!([{"market":"HAD","pick":"主胜","odds":1.8}]),
+        );
+        snapshot.data_quality_score = 60.0;
+        snapshot.is_final_pre_match = false;
+        let markdown = build_gpt_analysis_package_markdown(
+            Some(&match_row),
+            Some(&analysis),
+            Some(&snapshot),
+            &[rec],
+            &[],
+            &conn,
+            true,
+            true,
+            true,
+            "",
+            "无需去重",
+            "仅一个快照",
+            1,
+            "2040352",
+            "2040352",
+            "综合评分最高",
+        );
+        assert!(markdown.contains("⚠ 数据质量偏低，仅供观察，不建议作为主要判断依据。"));
+        assert!(markdown.contains("final snapshot 否"));
+        assert!(markdown.contains("* 数据质量：数据质量较完整，可供人工复核"));
+        assert!(!markdown.contains("可进入正式推荐"));
+    }
+
+    #[test]
+    fn final_snapshot_auto_mark_requires_within_six_hours_before_kickoff() {
+        let mut snapshot = test_snapshot("2040352", json!([]));
+        snapshot.created_before_kickoff = true;
+        snapshot.snapshot_time = "2026-07-01T15:00:00Z".to_string();
+        snapshot.kickoff_time = "2026-07-01T20:00:00Z".to_string();
+        let now = parse_time_as_utc("2026-07-01T15:00:00Z").unwrap();
+        assert_eq!(
+            final_auto_mark_allowed(&snapshot, now),
+            (true, "临场自动标记")
+        );
+
+        let far_now = parse_time_as_utc("2026-07-01T12:30:00Z").unwrap();
+        assert_eq!(
+            final_auto_mark_allowed(&snapshot, far_now),
+            (false, "距离开赛较远，仅普通快照")
+        );
+
+        snapshot.created_before_kickoff = false;
+        assert_eq!(
+            final_auto_mark_allowed(&snapshot, now),
+            (false, "赛后快照不可标记")
+        );
+    }
+
+    #[test]
+    fn gpt_today_overview_is_rendered() {
+        let packages = vec![
+            json!({
+                "merged_source_count": 2,
+                "is_final_snapshot": true,
+                "has_odds": true,
+                "has_model_probs": true,
+                "has_simulation": true,
+                "data_quality": 90.0
+            }),
+            json!({
+                "merged_source_count": 1,
+                "is_final_snapshot": false,
+                "has_odds": true,
+                "has_model_probs": true,
+                "has_simulation": true,
+                "data_quality": 60.0
+            }),
+        ];
+        let overview = gpt_today_overview_markdown(&packages);
+        assert!(overview.contains("# 今日 GPT 赛前分析包总览"));
+        assert!(overview.contains("- 比赛数量：2"));
+        assert!(overview.contains("- 已去重比赛数：1"));
+        assert!(overview.contains("- final snapshot 数量：1"));
+        assert!(overview.contains("- 数据质量低于 65 的比赛：1"));
     }
 
     #[test]
