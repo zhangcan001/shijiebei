@@ -30,6 +30,18 @@ export const state = {
   systemStatus: null,
   startupHealth: null,
   gptAnalysisPackage: null,
+  oneClickGptPackage: {
+    running: false,
+    startedAt: null,
+    finishedAt: null,
+    currentStep: null,
+    steps: [],
+    result: null,
+    warnings: [],
+    errors: [],
+    exportDir: "",
+    files: []
+  },
   manualAnalysisNotes: [],
   manualAnalysisComparison: null,
   manualAnalysisDraftMatchId: "",

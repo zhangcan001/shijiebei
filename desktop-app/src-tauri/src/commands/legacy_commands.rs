@@ -30,7 +30,7 @@ use crate::services::source_service::{
     source_health_label_for, source_is_optional,
 };
 use anyhow::Context;
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, NaiveDateTime, Utc};
 use rand::Rng;
 use rusqlite::types::ValueRef;
 use rusqlite::{params, Connection};
@@ -38,9 +38,11 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
+use std::future::Future;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration as StdDuration, Instant};
 use tauri::{AppHandle, Emitter};
 use zip::write::SimpleFileOptions;
 
@@ -8189,6 +8191,20 @@ struct ExportGptTodayPackagesRequest {
     split_files: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OneClickGptPackagePipelineRequest {
+    date: Option<String>,
+    scope: Option<String>,
+    start_date: Option<String>,
+    end_date: Option<String>,
+    include_simulation: Option<bool>,
+    include_upset_lab: Option<bool>,
+    include_raw_odds: Option<bool>,
+    split_files: Option<bool>,
+    auto_final_snapshot: Option<bool>,
+}
+
 fn compact_json_text(value: &Value) -> String {
     if value.is_null() {
         "-".to_string()
@@ -9834,6 +9850,777 @@ async fn open_gpt_exports_dir(app: AppHandle) -> Result<Value, String> {
     Ok(json!({
         "success": true,
         "export_dir": dir.to_string_lossy().to_string()
+    }))
+}
+
+fn pipeline_step_json(
+    key: &str,
+    label: &str,
+    status: &str,
+    started_at: &str,
+    start: Instant,
+    message: &str,
+    error: Option<String>,
+) -> Value {
+    json!({
+        "key": key,
+        "label": label,
+        "status": status,
+        "started_at": started_at,
+        "finished_at": Utc::now().to_rfc3339(),
+        "duration_ms": start.elapsed().as_millis() as u64,
+        "message": message,
+        "error": error
+    })
+}
+
+async fn run_one_click_pipeline_step<F, Fut>(
+    key: &str,
+    label: &str,
+    timeout_ms: u64,
+    warnings: &mut Vec<String>,
+    errors: &mut Vec<String>,
+    fail_on_error: bool,
+    action: F,
+) -> Value
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<Value, String>>,
+{
+    let started_at = Utc::now().to_rfc3339();
+    let start = Instant::now();
+    match tokio::time::timeout(StdDuration::from_millis(timeout_ms), action()).await {
+        Ok(Ok(value)) => {
+            let mut status = value
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("success")
+                .to_string();
+            if status != "success"
+                && status != "warning"
+                && status != "skipped"
+                && status != "failed"
+            {
+                status = "success".to_string();
+            }
+            let message = value
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("完成")
+                .to_string();
+            if status == "warning" || status == "skipped" {
+                warnings.push(format!("{}：{}", label, message));
+            }
+            if status == "failed" {
+                let error = value
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&message)
+                    .to_string();
+                if fail_on_error {
+                    errors.push(format!("{}：{}", label, error));
+                } else {
+                    warnings.push(format!("{}：{}", label, error));
+                }
+                let mut step = pipeline_step_json(
+                    key,
+                    label,
+                    "failed",
+                    &started_at,
+                    start,
+                    &message,
+                    Some(error),
+                );
+                if let Some(map) = step.as_object_mut() {
+                    map.insert("result".to_string(), value);
+                }
+                step
+            } else {
+                let mut step =
+                    pipeline_step_json(key, label, &status, &started_at, start, &message, None);
+                if let Some(map) = step.as_object_mut() {
+                    if let Some(files) = value.get("files") {
+                        map.insert("files".to_string(), files.clone());
+                    }
+                    if let Some(export_dir) = value.get("export_dir") {
+                        map.insert("export_dir".to_string(), export_dir.clone());
+                    }
+                    if let Some(match_count) = value.get("match_count") {
+                        map.insert("match_count".to_string(), match_count.clone());
+                    }
+                    if let Some(step_warnings) = value.get("warnings") {
+                        map.insert("warnings".to_string(), step_warnings.clone());
+                    }
+                    map.insert("result".to_string(), value);
+                }
+                step
+            }
+        }
+        Ok(Err(error)) => {
+            if fail_on_error {
+                errors.push(format!("{}：{}", label, error));
+                pipeline_step_json(
+                    key,
+                    label,
+                    "failed",
+                    &started_at,
+                    start,
+                    "失败",
+                    Some(error),
+                )
+            } else {
+                warnings.push(format!("{}：{}", label, error));
+                pipeline_step_json(
+                    key,
+                    label,
+                    "warning",
+                    &started_at,
+                    start,
+                    "失败但已继续",
+                    Some(error),
+                )
+            }
+        }
+        Err(_) => {
+            let error = format!("{} 超时", label);
+            if fail_on_error {
+                errors.push(error.clone());
+            } else {
+                warnings.push(error.clone());
+            }
+            pipeline_step_json(
+                key,
+                label,
+                "timeout",
+                &started_at,
+                start,
+                "超时，已释放流水线状态",
+                Some(error),
+            )
+        }
+    }
+}
+
+fn one_click_pipeline_dates(request: &OneClickGptPackagePipelineRequest) -> Vec<String> {
+    let today = Utc::now().format("%Y-%m-%d").to_string();
+    match request.scope.as_deref().unwrap_or("today") {
+        "tomorrow" => vec![(Utc::now() + ChronoDuration::days(1))
+            .format("%Y-%m-%d")
+            .to_string()],
+        "date_range" => {
+            let Some(start) = request.start_date.as_deref() else {
+                return vec![today];
+            };
+            let Some(end) = request.end_date.as_deref() else {
+                return vec![start.to_string()];
+            };
+            let Ok(mut current) = NaiveDate::parse_from_str(start, "%Y-%m-%d") else {
+                return vec![today];
+            };
+            let Ok(end_date) = NaiveDate::parse_from_str(end, "%Y-%m-%d") else {
+                return vec![current.format("%Y-%m-%d").to_string()];
+            };
+            let mut dates = Vec::new();
+            while current <= end_date && dates.len() < 14 {
+                dates.push(current.format("%Y-%m-%d").to_string());
+                current += ChronoDuration::days(1);
+            }
+            if dates.is_empty() {
+                vec![today]
+            } else {
+                dates
+            }
+        }
+        _ => vec![request
+            .date
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(today)],
+    }
+}
+
+fn save_gpt_pipeline_run(
+    app: &AppHandle,
+    started_at: &str,
+    status: &str,
+    scope: &str,
+    date: &str,
+    match_count: usize,
+    exported_match_count: usize,
+    export_dir: &str,
+    files: &[String],
+    warnings: &[String],
+    errors: &[String],
+    steps: &[Value],
+) -> Result<i64, String> {
+    let conn = open_conn(app)?;
+    let finished_at = Utc::now().to_rfc3339();
+    conn.execute(
+        "insert into gpt_package_pipeline_runs(
+          started_at, finished_at, status, scope, date, match_count, exported_match_count,
+          export_dir, files_json, warnings_json, errors_json, steps_json
+        ) values (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+        params![
+            started_at,
+            finished_at,
+            status,
+            scope,
+            date,
+            match_count as i64,
+            exported_match_count as i64,
+            export_dir,
+            json!(files).to_string(),
+            json!(warnings).to_string(),
+            json!(errors).to_string(),
+            json!(steps).to_string(),
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(conn.last_insert_rowid())
+}
+
+fn latest_created_snapshot_ids(value: &Value) -> Vec<i64> {
+    value
+        .get("per_match_results")
+        .and_then(Value::as_array)
+        .or_else(|| value.get("snapshots").and_then(Value::as_array))
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    item.pointer("/result/snapshot_id")
+                        .and_then(Value::as_i64)
+                        .or_else(|| item.get("snapshot_id").and_then(Value::as_i64))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn provider_key_configured(app: &AppHandle, provider_id: &str) -> bool {
+    open_conn(app)
+        .ok()
+        .and_then(|conn| provider_api_key(&conn, provider_id).ok().flatten())
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+async fn run_one_click_gpt_package_pipeline(
+    app: AppHandle,
+    request: Option<OneClickGptPackagePipelineRequest>,
+) -> Result<Value, String> {
+    let request = request.unwrap_or(OneClickGptPackagePipelineRequest {
+        date: None,
+        scope: Some("today".to_string()),
+        start_date: None,
+        end_date: None,
+        include_simulation: Some(true),
+        include_upset_lab: Some(true),
+        include_raw_odds: Some(false),
+        split_files: Some(false),
+        auto_final_snapshot: Some(true),
+    });
+    let started_at = Utc::now().to_rfc3339();
+    let scope = request.scope.as_deref().unwrap_or("today").to_string();
+    let dates = one_click_pipeline_dates(&request);
+    let date_label = if dates.len() == 1 {
+        dates[0].clone()
+    } else {
+        format!(
+            "{}..{}",
+            dates.first().unwrap_or(&String::new()),
+            dates.last().unwrap_or(&String::new())
+        )
+    };
+    let mut steps = Vec::new();
+    let mut warnings = Vec::new();
+    let mut errors = Vec::new();
+    let mut files = Vec::new();
+    let mut match_count = 0usize;
+    let mut exported_match_count = 0usize;
+    let mut export_dir = gpt_exports_dir(&app)?.to_string_lossy().to_string();
+
+    steps.push(
+        run_one_click_pipeline_step(
+            "preflight_check",
+            "运行前检查",
+            10_000,
+            &mut warnings,
+            &mut errors,
+            true,
+            || async {
+                let conn = open_conn(&app)?;
+                let _: i64 = conn
+                    .query_row("select count(*) from sqlite_master", [], |row| row.get(0))
+                    .map_err(|error| error.to_string())?;
+                let dir = gpt_exports_dir(&app)?;
+                let test_path = dir.join(".write-test");
+                fs::write(&test_path, "ok").map_err(|error| error.to_string())?;
+                let _ = fs::remove_file(&test_path);
+                let api_configured = provider_key_configured(&app, "api_football");
+                Ok(json!({
+                    "status": if api_configured { "success" } else { "warning" },
+                    "message": if api_configured { "数据库和导出目录可用。" } else { "API-Football 未配置，跳过伤停/首发同步。" },
+                    "api_football_configured": api_configured
+                }))
+            },
+        )
+        .await,
+    );
+
+    steps.push(
+        run_one_click_pipeline_step(
+            "sync_matches",
+            "同步比赛列表",
+            15_000,
+            &mut warnings,
+            &mut errors,
+            true,
+            || async {
+                let refresh = refresh_core_data(app.clone(), None, Some("eu".to_string())).await;
+                let matches = list_matches(app.clone()).await.unwrap_or_default();
+                if matches.is_empty() {
+                    return Err("今日比赛为空，请先确认日期或数据源。".to_string());
+                }
+                Ok(json!({
+                    "status": if refresh.is_ok() { "success" } else { "warning" },
+                    "message": format!("比赛列表 {} 场。{}", matches.len(), refresh.err().unwrap_or_default()),
+                    "match_count": matches.len()
+                }))
+            },
+        )
+        .await,
+    );
+    if errors.is_empty() {
+        match_count = list_matches(app.clone()).await.unwrap_or_default().len();
+    }
+
+    steps.push(
+        run_one_click_pipeline_step(
+            "dedupe_matches",
+            "合并重复比赛",
+            10_000,
+            &mut warnings,
+            &mut errors,
+            false,
+            || async {
+                let matches = list_matches(app.clone()).await.unwrap_or_default();
+                let snapshots = load_pre_match_snapshots(app.clone())
+                    .await
+                    .unwrap_or_default();
+                let analyses = list_match_analyses(app.clone()).await.unwrap_or_default();
+                let recommendations = list_recommendations(app.clone()).await.unwrap_or_default();
+                let open_matches = matches
+                    .into_iter()
+                    .filter(|item| !match_time_is_past(&item.time))
+                    .collect::<Vec<_>>();
+                let before = open_matches.len();
+                let after = dedupe_matches_for_gpt_export(
+                    open_matches,
+                    &snapshots,
+                    &analyses,
+                    &recommendations,
+                )
+                .len();
+                Ok(json!({
+                    "status": "success",
+                    "message": format!("去重前 {} 场，导出候选 {} 场。", before, after),
+                    "before": before,
+                    "after": after
+                }))
+            },
+        )
+        .await,
+    );
+
+    steps.push(
+        run_one_click_pipeline_step(
+            "sync_odds",
+            "同步赔率",
+            20_000,
+            &mut warnings,
+            &mut errors,
+            false,
+            || async {
+                let _ = refresh_core_data(app.clone(), None, Some("eu".to_string())).await?;
+                let conn = open_conn(&app)?;
+                let odds_record_count: i64 = conn
+                    .query_row("select count(*) from odds_snapshots", [], |row| row.get(0))
+                    .unwrap_or(0);
+                let market_count: i64 = conn
+                    .query_row("select count(distinct market) from odds_snapshots", [], |row| row.get(0))
+                    .unwrap_or(0);
+                Ok(json!({
+                    "status": if odds_record_count > 0 { "success" } else { "warning" },
+                    "message": format!("赔率记录 {} 条，市场 {} 个。", odds_record_count, market_count),
+                    "odds_record_count": odds_record_count,
+                    "market_count": market_count
+                }))
+            },
+        )
+        .await,
+    );
+
+    steps.push(
+        run_one_click_pipeline_step(
+            "sync_results",
+            "同步赛果",
+            15_000,
+            &mut warnings,
+            &mut errors,
+            false,
+            || async {
+                match refresh_results(app.clone()).await {
+                    Ok(results) => Ok(json!({
+                        "status": "success",
+                        "message": format!("赛果 {} 条。", results.len())
+                    })),
+                    Err(error) => Ok(json!({
+                        "status": "warning",
+                        "message": format!("赛果同步失败，已继续：{}", error)
+                    })),
+                }
+            },
+        )
+        .await,
+    );
+
+    steps.push(
+        run_one_click_pipeline_step(
+            "sync_lineups_injuries",
+            "同步伤停/首发",
+            20_000,
+            &mut warnings,
+            &mut errors,
+            false,
+            || async {
+                if !provider_key_configured(&app, "api_football") {
+                    return Ok(json!({
+                        "status": "skipped",
+                        "message": "API-Football 未配置，跳过伤停/首发同步。"
+                    }));
+                }
+                match refresh_sporttery_injuries(app.clone()).await {
+                    Ok(value) => Ok(json!({
+                        "status": "success",
+                        "message": format!("伤停/首发同步完成：{} 条。", value.get("count").and_then(Value::as_i64).unwrap_or(0))
+                    })),
+                    Err(error) => Ok(json!({
+                        "status": "warning",
+                        "message": format!("伤停/首发同步失败，已继续：{}", error)
+                    })),
+                }
+            },
+        )
+        .await,
+    );
+
+    steps.push(
+        run_one_click_pipeline_step(
+            "run_predictions",
+            "运行模型预测",
+            20_000,
+            &mut warnings,
+            &mut errors,
+            false,
+            || async {
+                let analyses = list_match_analyses(app.clone()).await.unwrap_or_default();
+                let recommendations = list_recommendations(app.clone()).await.unwrap_or_default();
+                let _ = today_bet_plan(app.clone()).await;
+                let _ = worldcup_practical_advice(app.clone()).await;
+                Ok(json!({
+                    "status": if analyses.is_empty() && recommendations.is_empty() { "warning" } else { "success" },
+                    "message": format!("模型分析 {} 条，建议明细 {} 条。", analyses.len(), recommendations.len())
+                }))
+            },
+        )
+        .await,
+    );
+
+    steps.push(
+        run_one_click_pipeline_step(
+            "run_simulations",
+            "运行模拟比赛",
+            20_000,
+            &mut warnings,
+            &mut errors,
+            false,
+            || async {
+                let analyses = list_match_analyses(app.clone()).await.unwrap_or_default();
+                let with_sim = analyses
+                    .iter()
+                    .filter(|item| !item.scores.is_empty())
+                    .count();
+                Ok(json!({
+                    "status": if with_sim > 0 { "success" } else { "warning" },
+                    "message": if with_sim > 0 {
+                        format!("已读取 {} 场轻量模拟/比分矩阵信息。", with_sim)
+                    } else {
+                        "暂无模拟数据；导出包会标记暂无模拟，不中断。".to_string()
+                    }
+                }))
+            },
+        )
+        .await,
+    );
+
+    steps.push(
+        run_one_click_pipeline_step(
+            "create_snapshots",
+            "生成赛前快照",
+            20_000,
+            &mut warnings,
+            &mut errors,
+            false,
+            || async {
+                match create_today_pre_match_snapshots(app.clone()).await {
+                    Ok(value) => Ok(json!({
+                        "status": if value.get("failed_count").and_then(Value::as_i64).unwrap_or(0) > 0 { "warning" } else { "success" },
+                        "message": format!("生成快照 {} 条，失败 {} 条。", value.get("created_count").and_then(Value::as_i64).unwrap_or(0), value.get("failed_count").and_then(Value::as_i64).unwrap_or(0)),
+                        "result": value
+                    })),
+                    Err(error) => Ok(json!({
+                        "status": "warning",
+                        "message": format!("生成快照失败，仍继续导出非冻结分析包：{}", error)
+                    })),
+                }
+            },
+        )
+        .await,
+    );
+    let created_snapshot_ids = steps
+        .last()
+        .and_then(|step| step.pointer("/result/result"))
+        .map(latest_created_snapshot_ids)
+        .unwrap_or_default();
+
+    steps.push(
+        run_one_click_pipeline_step(
+            "mark_final_snapshots",
+            "标记 final snapshot",
+            20_000,
+            &mut warnings,
+            &mut errors,
+            false,
+            || async {
+                if !request.auto_final_snapshot.unwrap_or(true) {
+                    return Ok(json!({
+                        "status": "skipped",
+                        "message": "已按配置跳过自动 final snapshot。"
+                    }));
+                }
+                let snapshots = load_pre_match_snapshots(app.clone()).await.unwrap_or_default();
+                let ids = if created_snapshot_ids.is_empty() {
+                    snapshots
+                        .iter()
+                        .filter(|item| item.created_before_kickoff)
+                        .map(|item| item.id)
+                        .collect::<Vec<_>>()
+                } else {
+                    created_snapshot_ids.clone()
+                };
+                let mut marked = 0usize;
+                let mut failed = 0usize;
+                for snapshot_id in ids {
+                    match mark_final_pre_match_snapshot(app.clone(), snapshot_id).await {
+                        Ok(_) => marked += 1,
+                        Err(_) => failed += 1,
+                    }
+                }
+                Ok(json!({
+                    "status": if failed > 0 { "warning" } else if marked == 0 { "skipped" } else { "success" },
+                    "message": format!("标记 final {} 条，失败 {} 条。", marked, failed)
+                }))
+            },
+        )
+        .await,
+    );
+
+    steps.push(
+        run_one_click_pipeline_step(
+            "run_upset_lab",
+            "运行冷门实验室扫描",
+            20_000,
+            &mut warnings,
+            &mut errors,
+            false,
+            || async {
+                if !request.include_upset_lab.unwrap_or(true) {
+                    return Ok(json!({
+                        "status": "skipped",
+                        "message": "已按配置跳过冷门实验室。"
+                    }));
+                }
+                match generate_upset_lab_candidates(app.clone()).await {
+                    Ok(value) => Ok(json!({
+                        "status": "success",
+                        "message": format!("冷门候选 {} 条。", value.get("candidate_count").and_then(Value::as_i64).or_else(|| value.get("count").and_then(Value::as_i64)).unwrap_or(0))
+                    })),
+                    Err(error) => Ok(json!({
+                        "status": "warning",
+                        "message": format!("冷门实验室扫描失败，已继续：{}", error)
+                    })),
+                }
+            },
+        )
+        .await,
+    );
+
+    steps.push(
+        run_one_click_pipeline_step(
+            "validate_export_quality",
+            "检查导出质量",
+            15_000,
+            &mut warnings,
+            &mut errors,
+            false,
+            || async {
+                let packages = gpt_today_analysis_packages(app.clone()).await.unwrap_or_else(|error| {
+                    json!({
+                        "count": 0,
+                        "packages": [],
+                        "markdown": "",
+                        "message": error
+                    })
+                });
+                let markdown = packages.get("markdown").and_then(Value::as_str).unwrap_or("");
+                let has_secret = markdown.contains("apiKey=")
+                    || markdown.contains("API_KEY")
+                    || markdown.contains("sk-")
+                    || markdown.contains("X-Auth-Token");
+                let package_count = packages.get("count").and_then(Value::as_u64).unwrap_or(0);
+                Ok(json!({
+                    "status": if has_secret { "failed" } else if package_count == 0 { "warning" } else { "success" },
+                    "message": if has_secret {
+                        "导出内容疑似包含密钥，已标记失败。".to_string()
+                    } else {
+                        format!("导出质量检查完成，候选包 {} 场。", package_count)
+                    }
+                }))
+            },
+        )
+        .await,
+    );
+
+    steps.push(
+        run_one_click_pipeline_step(
+            "export_gpt_package",
+            "导出 GPT 分析包",
+            20_000,
+            &mut warnings,
+            &mut errors,
+            true,
+            || async {
+                let mut step_files = Vec::new();
+                let mut step_match_count = 0usize;
+                let mut step_warnings = Vec::new();
+                for date in &dates {
+                    let value = export_gpt_today_packages(
+                        app.clone(),
+                        ExportGptTodayPackagesRequest {
+                            date: Some(date.clone()),
+                            include_simulation: request.include_simulation,
+                            include_upset_lab: request.include_upset_lab,
+                            include_raw_odds: request.include_raw_odds,
+                            split_files: request.split_files,
+                        },
+                    )
+                    .await?;
+                    if let Some(dir) = value.get("export_dir").and_then(Value::as_str) {
+                        export_dir = dir.to_string();
+                    }
+                    if let Some(items) = value.get("files").and_then(Value::as_array) {
+                        step_files.extend(items.iter().filter_map(Value::as_str).map(str::to_string));
+                    }
+                    step_match_count += value.get("match_count").and_then(Value::as_u64).unwrap_or(0) as usize;
+                    if let Some(items) = value.get("warnings").and_then(Value::as_array) {
+                        step_warnings.extend(items.iter().filter_map(Value::as_str).map(str::to_string));
+                    }
+                }
+                Ok(json!({
+                    "status": if step_files.is_empty() { "warning" } else { "success" },
+                    "message": if step_files.is_empty() { "未导出文件，请检查今日比赛和日期。" } else { "GPT 分析包已导出到桌面目录。" },
+                    "files": step_files,
+                    "match_count": step_match_count,
+                    "warnings": step_warnings,
+                    "export_dir": export_dir
+                }))
+            },
+        )
+        .await,
+    );
+    if let Some(last) = steps.last() {
+        if let Some(items) = last.get("files").and_then(Value::as_array) {
+            files.extend(items.iter().filter_map(Value::as_str).map(str::to_string));
+        }
+        exported_match_count =
+            last.get("match_count").and_then(Value::as_u64).unwrap_or(0) as usize;
+        if let Some(dir) = last.get("export_dir").and_then(Value::as_str) {
+            export_dir = dir.to_string();
+        }
+        if let Some(items) = last.get("warnings").and_then(Value::as_array) {
+            warnings.extend(items.iter().filter_map(Value::as_str).map(str::to_string));
+        }
+    }
+
+    steps.push(pipeline_step_json(
+        "finish",
+        "完成",
+        if errors.is_empty() {
+            if warnings.is_empty() {
+                "success"
+            } else {
+                "warning"
+            }
+        } else {
+            "failed"
+        },
+        &Utc::now().to_rfc3339(),
+        Instant::now(),
+        if errors.is_empty() {
+            "一键 GPT 分析包流水线完成。"
+        } else {
+            "一键 GPT 分析包流水线未完全成功。"
+        },
+        errors.first().cloned(),
+    ));
+
+    let status = if errors.is_empty() {
+        if warnings.is_empty() {
+            "success"
+        } else {
+            "warning"
+        }
+    } else {
+        "failed"
+    };
+    let run_id = save_gpt_pipeline_run(
+        &app,
+        &started_at,
+        status,
+        &scope,
+        &date_label,
+        match_count,
+        exported_match_count,
+        &export_dir,
+        &files,
+        &warnings,
+        &errors,
+        &steps,
+    )?;
+    Ok(json!({
+        "success": errors.is_empty() && !files.is_empty(),
+        "status": status,
+        "run_id": run_id,
+        "export_dir": export_dir,
+        "files": files,
+        "match_count": match_count,
+        "exported_match_count": exported_match_count,
+        "skipped_match_count": match_count.saturating_sub(exported_match_count),
+        "steps": steps,
+        "warnings": warnings,
+        "errors": errors
     }))
 }
 
@@ -13692,6 +14479,7 @@ pub fn run_app() {
             export_gpt_today_analysis_markdown,
             export_gpt_match_package,
             export_gpt_today_packages,
+            run_one_click_gpt_package_pipeline,
             open_gpt_exports_dir,
             save_manual_analysis_note,
             get_manual_analysis_notes,
@@ -14208,6 +14996,27 @@ mod tests {
         assert!(source.contains("debug_refresh_state"));
         assert!(source.contains("\"backend_active_tasks\""));
         assert!(source.contains("\"not_tracked\""));
+    }
+
+    #[test]
+    fn one_click_gpt_pipeline_command_and_frontend_are_registered() {
+        let backend = include_str!("legacy_commands.rs");
+        let frontend = include_str!("../../../src/legacyMain.js");
+        assert!(backend.contains("async fn run_one_click_gpt_package_pipeline"));
+        assert!(backend.contains("run_one_click_gpt_package_pipeline"));
+        assert!(backend.contains("gpt_package_pipeline_runs"));
+        assert!(frontend.contains("data-action=\"one-click-gpt-package\""));
+        assert!(frontend.contains("resetOneClickGptPackageState"));
+        assert!(frontend.contains("一键生成 GPT 分析包"));
+    }
+
+    #[test]
+    fn one_click_pipeline_log_table_is_declared() {
+        let schema = include_str!("../db.rs");
+        assert!(schema.contains("create table if not exists gpt_package_pipeline_runs"));
+        assert!(schema.contains("steps_json text not null default '[]'"));
+        assert!(schema.contains("warnings_json text not null default '[]'"));
+        assert!(schema.contains("errors_json text not null default '[]'"));
     }
 
     #[test]

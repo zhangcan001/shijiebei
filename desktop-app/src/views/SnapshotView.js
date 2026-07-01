@@ -68,6 +68,8 @@ export function renderSnapshotView(state, helpers = {}) {
   return `
     <div class="grid">
       <section class="panel span-12 toolbar">
+        <button class="btn" data-action="one-click-gpt-package" ${state.oneClickGptPackage?.running ? "disabled" : ""}>${state.oneClickGptPackage?.running ? "正在生成..." : "一键生成 GPT 分析包"}</button>
+        <button class="btn secondary" data-action="open-gpt-exports-dir">打开分析包目录</button>
         <button class="btn" data-action="create-today-pre-snapshots">批量生成今日快照</button>
         <button class="btn secondary" data-action="refresh-external">全局刷新数据源</button>
         <button class="btn secondary" data-action="audit-pre-snapshots">运行快照审计</button>
@@ -81,6 +83,7 @@ export function renderSnapshotView(state, helpers = {}) {
         <button class="btn ghost" data-action="open-backup-dir">打开备份目录</button>
         <span class="muted">赛前快照一旦生成，不会被赛后结果覆盖；结算只写入独立结果表。</span>
       </section>
+      ${helpers.oneClickGptPackageProgressHtml ? helpers.oneClickGptPackageProgressHtml() : ""}
       ${systemStatusHtml(state)}
       ${workflowHtml()}
       <section class="panel span-3 metric"><span>快照数</span><strong>${snapshots.length}</strong><div class="muted">允许同场多快照</div></section>

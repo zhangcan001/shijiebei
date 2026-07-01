@@ -123,6 +123,171 @@ async function openGptExportsDir() {
   state.probeResult = await api.invokeCommand("open_gpt_exports_dir");
 }
 
+function oneClickStepBadge(status) {
+  const text = {
+    pending: "等待",
+    running: "执行中",
+    success: "成功",
+    warning: "警告",
+    failed: "失败",
+    skipped: "跳过",
+    timeout: "超时"
+  }[status] || "-";
+  const cls = status === "success" ? "good" : ["warning", "running", "skipped"].includes(status) ? "warn" : ["failed", "timeout"].includes(status) ? "bad" : "";
+  return `<span class="badge ${cls}">${text}</span>`;
+}
+
+function setOneClickGptPackageState(patch = {}) {
+  state.oneClickGptPackage = {
+    ...(state.oneClickGptPackage || {}),
+    ...patch
+  };
+  render();
+}
+
+function resetOneClickGptPackageState() {
+  state.oneClickGptPackage = {
+    running: false,
+    startedAt: null,
+    finishedAt: new Date().toISOString(),
+    currentStep: null,
+    steps: [],
+    result: null,
+    warnings: ["已重置生成状态。若后台请求仍在运行，请稍后再试。"],
+    errors: [],
+    exportDir: "",
+    files: []
+  };
+  state.busy = false;
+  state.message = "已重置 GPT 分析包生成状态。";
+  render();
+}
+
+async function runOneClickGptPackagePipeline() {
+  const current = state.oneClickGptPackage || {};
+  if (current.running) {
+    const elapsed = current.startedAt ? Date.now() - new Date(current.startedAt).getTime() : 0;
+    state.message = elapsed > 120000 ? "GPT 分析包生成可能已卡住，可点击“重置生成状态”。" : "GPT 分析包生成中，请稍后。";
+    render();
+    return;
+  }
+  const startedAt = new Date().toISOString();
+  setOneClickGptPackageState({
+    running: true,
+    startedAt,
+    finishedAt: null,
+    currentStep: "pipeline",
+    steps: [{
+      key: "pipeline",
+      label: "一键生成 GPT 分析包",
+      status: "running",
+      started_at: startedAt,
+      message: "正在同步数据、生成快照并导出 Markdown"
+    }],
+    result: null,
+    warnings: [],
+    errors: [],
+    exportDir: "",
+    files: []
+  });
+  try {
+    const result = await withTimeout(api.invokeCommand("run_one_click_gpt_package_pipeline", {
+      request: {
+        scope: "today",
+        includeSimulation: true,
+        includeUpsetLab: true,
+        includeRawOdds: false,
+        splitFiles: false,
+        autoFinalSnapshot: true
+      }
+    }), 120000, "一键生成 GPT 分析包");
+    state.probeResult = result;
+    setOneClickGptPackageState({
+      running: false,
+      finishedAt: new Date().toISOString(),
+      currentStep: null,
+      steps: result.steps || [],
+      result,
+      warnings: result.warnings || [],
+      errors: result.errors || [],
+      exportDir: result.export_dir || "",
+      files: result.files || []
+    });
+    state.message = result.success ? "已导出 GPT 分析包。" : "生成未完全成功，请查看步骤详情。";
+    await refreshTodayContext("GPT分析包流水线");
+    await refreshSnapshotContext("GPT分析包流水线");
+    await refreshDataHealth("GPT分析包流水线");
+  } catch (error) {
+    const message = error?.message || String(error);
+    setOneClickGptPackageState({
+      running: false,
+      finishedAt: new Date().toISOString(),
+      currentStep: null,
+      errors: [message],
+      warnings: [],
+      steps: [{
+        key: "pipeline",
+        label: "一键生成 GPT 分析包",
+        status: message.includes("超时") ? "timeout" : "failed",
+        started_at: startedAt,
+        finished_at: new Date().toISOString(),
+        message: "生成未完全成功，请查看错误。",
+        error: message
+      }]
+    });
+    state.message = "生成未完全成功，请查看步骤详情。";
+  } finally {
+    state.busy = false;
+    render();
+  }
+}
+
+function oneClickGptPackageProgressHtml() {
+  const flow = state.oneClickGptPackage || {};
+  const steps = flow.steps || [];
+  const started = flow.startedAt ? new Date(flow.startedAt).toLocaleTimeString("zh-CN", { hour12: false }) : "-";
+  const elapsed = flow.startedAt
+    ? Math.max(0, Math.round(((flow.finishedAt ? new Date(flow.finishedAt).getTime() : Date.now()) - new Date(flow.startedAt).getTime()) / 1000))
+    : 0;
+  const current = steps.find(step => step.status === "running") || steps.find(step => step.key === flow.currentStep);
+  const statusText = flow.running ? "正在生成" : (flow.errors || []).length ? "失败/未完全成功" : flow.finishedAt ? "完成" : "空闲";
+  return `
+    <section class="panel span-12">
+      <div class="card-head">
+        <div>
+          <h3>一键 GPT 分析包</h3>
+          <p class="muted">当前状态：${statusText} · 开始：${started} · 已耗时：${elapsed}s · 当前步骤：${current?.label || "-"}</p>
+        </div>
+        <div class="actions">
+          <button class="btn" data-action="one-click-gpt-package" ${flow.running ? "disabled" : ""}>${flow.running ? "正在生成..." : flow.files?.length ? "已导出 GPT 分析包" : "一键生成 GPT 分析包"}</button>
+          <button class="btn secondary" data-action="open-gpt-exports-dir">打开分析包目录</button>
+          <button class="btn ghost" data-action="reset-one-click-gpt-package">重置生成状态</button>
+        </div>
+      </div>
+      ${flow.exportDir ? `<p class="muted wrap-text">导出目录：${flow.exportDir}</p>` : ""}
+      ${(flow.files || []).length ? `<p class="muted wrap-text">文件：${flow.files.join("；")}</p>` : ""}
+      ${(flow.warnings || []).length ? `<p class="muted wrap-text">提示：${flow.warnings.join("；")}</p>` : ""}
+      ${(flow.errors || []).length ? `<p class="muted wrap-text">错误：${flow.errors.join("；")}</p>` : ""}
+      <div class="scroll-table">
+        <table>
+          <thead><tr><th>步骤</th><th>状态</th><th>耗时</th><th>说明</th><th>错误</th></tr></thead>
+          <tbody>
+            ${steps.length ? steps.map(step => `
+              <tr>
+                <td>${step.label || step.key}</td>
+                <td>${oneClickStepBadge(step.status)}</td>
+                <td>${step.duration_ms || step.durationMs ? `${Math.round(Number(step.duration_ms || step.durationMs) / 1000)}s` : "-"}</td>
+                <td class="wrap-text">${step.message || "-"}</td>
+                <td class="wrap-text">${step.error || "-"}</td>
+              </tr>
+            `).join("") : `<tr><td colspan="5" class="muted">尚未执行一键生成。</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
 function prepareManualAnalysis(matchId, label = "") {
   state.manualAnalysisDraftMatchId = matchId || "";
   state.manualAnalysisDraftLabel = label || matchId || "";
@@ -1546,6 +1711,7 @@ function manualAnalysisPanelHtml() {
       <h3>GPT 分析包 / 人工分析记录</h3>
       <p class="muted">本工具只整理赛前数据和冻结快照，不保证预测准确。建议复制 GPT 分析包后，结合 GPT 网页版和人工判断再记录结论。</p>
       <div class="toolbar">
+        <button class="btn" data-action="one-click-gpt-package" ${state.oneClickGptPackage?.running ? "disabled" : ""}>${state.oneClickGptPackage?.running ? "正在生成..." : "一键生成 GPT 分析包"}</button>
         <button class="btn secondary" data-action="copy-today-gpt-packages">批量复制今日 GPT 分析包</button>
         <button class="btn secondary" data-action="export-gpt-today-packages">一键导出今日全部GPT分析包</button>
         <button class="btn secondary" data-action="open-gpt-exports-dir">打开GPT包目录</button>
@@ -1621,12 +1787,14 @@ function todayPlanHtml() {
         <button class="btn" data-action="refresh-today">重新生成今日方案</button>
         <button class="btn secondary" data-action="refresh-core">刷新赔率并重算</button>
         <button class="btn secondary" data-action="freeze-rec">冻结赛前快照</button>
+        <button class="btn" data-action="one-click-gpt-package" ${state.oneClickGptPackage?.running ? "disabled" : ""}>${state.oneClickGptPackage?.running ? "正在生成..." : "一键生成 GPT 分析包"}</button>
         <button class="btn secondary" data-action="copy-today-gpt-packages">批量复制今日 GPT 分析包</button>
         <button class="btn secondary" data-action="export-gpt-today-packages">一键导出今日全部GPT分析包</button>
         <button class="btn secondary" data-action="open-gpt-exports-dir">打开GPT包目录</button>
         <button class="btn secondary" data-view="review">赛后复盘入口</button>
         <span class="muted">${plan?.review_hint || "今日方案会自动读取最新赛前快照；没有 final snapshot 时使用最新快照并提示复查。"}</span>
       </section>
+      ${oneClickGptPackageProgressHtml()}
       <section class="panel span-12"><h3>等赔率提示</h3><p class="muted">${plan?.wait_notes?.length ? plan.wait_notes.join("；") : "暂无等待提示。"}</p></section>
       ${manualAnalysisPanelHtml()}
       <section class="panel span-12 table-panel"><h3>今日主推</h3><div class="scroll-table"><table><thead><tr><th>时间</th><th>比赛</th><th>玩法</th><th>选择</th><th>模型</th><th>市场</th><th>赔率</th><th>EV</th><th>数据</th><th>建议仓位</th><th>GPT/人工</th></tr></thead><tbody>${practicalRows(advice.main || [], "今日暂无主推。")}</tbody></table></div></section>
@@ -1955,6 +2123,8 @@ function preMatchSnapshotHtml() {
   return `
     <div class="grid">
       <section class="panel span-12 toolbar">
+        <button class="btn" data-action="one-click-gpt-package" ${state.oneClickGptPackage?.running ? "disabled" : ""}>${state.oneClickGptPackage?.running ? "正在生成..." : "一键生成 GPT 分析包"}</button>
+        <button class="btn secondary" data-action="open-gpt-exports-dir">打开分析包目录</button>
         <button class="btn" data-action="create-today-pre-snapshots">批量生成今日快照</button>
         <button class="btn secondary" data-action="refresh-external">全局刷新数据源</button>
         <button class="btn secondary" data-action="audit-pre-snapshots">运行快照审计</button>
@@ -1971,6 +2141,7 @@ function preMatchSnapshotHtml() {
         <button class="btn ghost" data-action="open-backup-dir">打开备份目录</button>
         <span class="muted">赛前快照一旦生成，不会被赛后结果覆盖；结算只写入独立结果表。</span>
       </section>
+      ${oneClickGptPackageProgressHtml()}
       ${systemStatusHtml()}
       ${manualAnalysisPanelHtml()}
       ${snapshotWorkflowHtml()}
@@ -2990,6 +3161,8 @@ document.addEventListener("click", event => {
   if (action === "export-gpt-match-package") safeRun("导出 GPT 分析包到桌面", async () => exportGptMatchPackage(event.target.dataset.matchId, event.target.dataset.snapshotId));
   if (action === "copy-today-gpt-packages") safeRun("批量复制 GPT 分析包", copyTodayGptAnalysisPackages);
   if (action === "export-today-gpt-packages" || action === "export-gpt-today-packages") safeRun("导出 GPT 分析包", exportTodayGptAnalysisPackages);
+  if (action === "one-click-gpt-package") safeRun("一键生成 GPT 分析包", runOneClickGptPackagePipeline);
+  if (action === "reset-one-click-gpt-package") resetOneClickGptPackageState();
   if (action === "open-gpt-exports-dir") safeRun("打开 GPT 分析包目录", openGptExportsDir);
   if (action === "prepare-manual-analysis") {
     prepareManualAnalysis(event.target.dataset.matchId, event.target.dataset.matchLabel);

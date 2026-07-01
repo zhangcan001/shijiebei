@@ -399,6 +399,21 @@ pub(crate) fn open_conn(app: &AppHandle) -> Result<Connection, String> {
         );
         create index if not exists idx_snapshot_audit_logs_match
           on snapshot_audit_logs(match_id, snapshot_id, audit_type);
+        create table if not exists gpt_package_pipeline_runs (
+          id integer primary key autoincrement,
+          started_at text not null,
+          finished_at text not null,
+          status text not null,
+          scope text not null,
+          date text not null,
+          match_count integer not null default 0,
+          exported_match_count integer not null default 0,
+          export_dir text not null default '',
+          files_json text not null default '[]',
+          warnings_json text not null default '[]',
+          errors_json text not null default '[]',
+          steps_json text not null default '[]'
+        );
         create table if not exists odds_anomalies (
           id integer primary key autoincrement,
           created_at text not null,

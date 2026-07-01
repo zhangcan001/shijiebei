@@ -152,6 +152,46 @@ function globalRefreshProgressHtml(state) {
   `;
 }
 
+function oneClickGptPackageProgressHtml(state) {
+  const flow = state.oneClickGptPackage || {};
+  const steps = flow.steps || [];
+  const statusText = flow.running ? "正在生成" : (flow.errors || []).length ? "失败/未完全成功" : flow.finishedAt ? "完成" : "空闲";
+  return `
+    <section class="panel span-12">
+      <div class="card-head">
+        <div>
+          <h3>一键 GPT 分析包进度</h3>
+          <p class="muted">状态：${statusText} · 导出目录：${safe(flow.exportDir)}</p>
+        </div>
+        <div class="actions source-actions">
+          <button class="btn" data-action="one-click-gpt-package" ${flow.running ? "disabled" : ""}>${flow.running ? "正在生成..." : "一键生成 GPT 分析包"}</button>
+          <button class="btn secondary" data-action="open-gpt-exports-dir">打开分析包目录</button>
+          <button class="btn ghost" data-action="reset-one-click-gpt-package">重置生成状态</button>
+        </div>
+      </div>
+      ${(flow.files || []).length ? `<p class="muted wrap-text">文件：${flow.files.join("；")}</p>` : ""}
+      ${(flow.warnings || []).length ? `<p class="muted wrap-text">提示：${flow.warnings.join("；")}</p>` : ""}
+      ${(flow.errors || []).length ? `<p class="muted wrap-text">错误：${flow.errors.join("；")}</p>` : ""}
+      <div class="scroll-table">
+        <table>
+          <thead><tr><th>步骤</th><th>状态</th><th>耗时</th><th>说明</th><th>错误</th></tr></thead>
+          <tbody>
+            ${steps.length ? steps.map(step => `
+              <tr>
+                <td>${safe(step.label || step.key)}</td>
+                <td>${stepBadge(step.status)}</td>
+                <td>${step.duration_ms || step.durationMs ? `${Math.round(Number(step.duration_ms || step.durationMs) / 1000)}s` : "-"}</td>
+                <td class="wrap-text">${safe(step.message)}</td>
+                <td class="wrap-text">${safe(step.error)}</td>
+              </tr>
+            `).join("") : `<tr><td colspan="5" class="muted">尚未执行一键生成。</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
 export function renderSourceView(state) {
   const providers = state.providers || state.status?.providers || [];
   const config = state.externalConfig || {};
@@ -176,6 +216,7 @@ export function renderSourceView(state) {
           </div>
           <div class="actions source-actions">
             <button class="btn" data-action="global-refresh" ${refreshRunning ? "disabled" : ""}>${refreshRunning ? "正在刷新..." : "全局刷新"}</button>
+            <button class="btn" data-action="one-click-gpt-package" ${state.oneClickGptPackage?.running ? "disabled" : ""}>${state.oneClickGptPackage?.running ? "正在生成..." : "一键生成 GPT 分析包"}</button>
             <button class="btn secondary" data-action="save-source-config">保存配置</button>
             <button class="btn secondary" data-action="create-today-pre-match-snapshots">生成今日快照</button>
             <button class="btn ghost" data-action="open-backup-dir">打开备份目录</button>
@@ -184,6 +225,7 @@ export function renderSourceView(state) {
       </section>
 
       ${globalRefreshProgressHtml(state)}
+      ${oneClickGptPackageProgressHtml(state)}
 
       <section class="panel span-12">
         <div class="card-head"><h3>API 配置</h3></div>
