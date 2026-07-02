@@ -8187,6 +8187,7 @@ struct ExportGptMatchPackageRequest {
     include_simulation: Option<bool>,
     include_upset_lab: Option<bool>,
     include_raw_odds: Option<bool>,
+    include_odds_movement: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -8196,6 +8197,7 @@ struct ExportGptTodayPackagesRequest {
     include_simulation: Option<bool>,
     include_upset_lab: Option<bool>,
     include_raw_odds: Option<bool>,
+    include_odds_movement: Option<bool>,
     split_files: Option<bool>,
 }
 
@@ -8209,6 +8211,7 @@ struct OneClickGptPackagePipelineRequest {
     include_simulation: Option<bool>,
     include_upset_lab: Option<bool>,
     include_raw_odds: Option<bool>,
+    include_odds_movement: Option<bool>,
     split_files: Option<bool>,
     auto_final_snapshot: Option<bool>,
 }
@@ -8693,6 +8696,502 @@ fn movement_for_pick(conn: &Connection, match_id: &str, market_prefix: &str, pic
         },
     )
     .unwrap_or_else(|_| "-".to_string())
+}
+
+#[derive(Debug, Clone)]
+struct OddsMovementDetail {
+    market: String,
+    pick: String,
+    opening_odds: f64,
+    latest_odds: f64,
+    min_odds: f64,
+    max_odds: f64,
+    odds_change_abs: f64,
+    odds_change_pct: f64,
+    direction: String,
+    snapshot_count: usize,
+    first_seen_at: String,
+    latest_seen_at: String,
+    volatility: f64,
+    trend_strength: f64,
+    is_latest_low: bool,
+    is_latest_high: bool,
+    change_label: String,
+    interpretation: String,
+}
+
+fn classify_odds_movement(
+    opening: f64,
+    latest: f64,
+    min_odds: f64,
+    max_odds: f64,
+    snapshot_count: usize,
+) -> (String, String, f64, f64, bool, bool) {
+    if snapshot_count < 2 || opening <= 0.0 || latest <= 0.0 {
+        return (
+            "快照不足".to_string(),
+            "快照不足".to_string(),
+            0.0,
+            0.0,
+            false,
+            false,
+        );
+    }
+    let change_pct = (latest - opening) / opening;
+    let volatility = if min_odds > 0.0 {
+        (max_odds - min_odds) / min_odds
+    } else {
+        0.0
+    };
+    let direction = if change_pct <= -0.01 {
+        "降赔"
+    } else if change_pct >= 0.01 {
+        "升赔"
+    } else {
+        "持平"
+    };
+    let label = if volatility >= 0.10 {
+        "剧烈波动"
+    } else if change_pct <= -0.03 {
+        "明显降赔"
+    } else if change_pct <= -0.01 {
+        "轻微降赔"
+    } else if change_pct.abs() < 0.01 {
+        "持平"
+    } else if change_pct < 0.03 {
+        "轻微升赔"
+    } else {
+        "明显升赔"
+    };
+    let trend_strength = change_pct.abs().max(volatility * 0.5);
+    let is_latest_low = min_odds > 0.0 && latest <= min_odds * 1.01;
+    let is_latest_high = max_odds > 0.0 && latest >= max_odds * 0.99;
+    (
+        direction.to_string(),
+        label.to_string(),
+        volatility,
+        trend_strength,
+        is_latest_low,
+        is_latest_high,
+    )
+}
+
+fn odds_market_group(market: &str) -> &'static str {
+    if market.starts_with("HHAD") || market.contains("让球") {
+        "HHAD"
+    } else if market.starts_with("TTG") || market.contains("总进球") {
+        "TTG"
+    } else if market.starts_with("CRS") || market.contains("比分") {
+        "CRS"
+    } else {
+        "HAD"
+    }
+}
+
+fn odds_pick_interpretation(market: &str, pick: &str, direction: &str, label: &str) -> String {
+    if direction == "快照不足" {
+        return "该选项赔率快照不足，不能判断真实变化。".to_string();
+    }
+    let down = direction == "降赔";
+    let group = odds_market_group(market);
+    match (group, pick, down) {
+        ("HAD", "主胜", true) => "主胜降赔，市场对主胜方向有增强支持。".to_string(),
+        ("HAD", "主胜", false) if direction == "升赔" => {
+            "主胜升赔，强队热度降温，需警惕市场对主胜信心下降。".to_string()
+        }
+        ("HAD", "平局", true) => "平局降赔，冷平风险上升。".to_string(),
+        ("HAD", "客胜", true) => "客胜降赔，冷门方向受到市场关注。".to_string(),
+        ("HHAD", "让胜", true) => "让胜降赔，市场更支持强队穿盘。".to_string(),
+        ("HHAD", "让胜", false) if direction == "升赔" => {
+            "让胜升赔，市场对强队大胜信心下降。".to_string()
+        }
+        ("HHAD", "让平", true) => "让平降赔，市场更支持强队小胜一球。".to_string(),
+        ("HHAD", "让负", true) => "让负降赔，弱队守住盘口风险上升。".to_string(),
+        ("TTG", pick, true) if pick.contains('0') || pick.contains('1') || pick.contains('2') => {
+            "低/中总进球降赔，市场偏向小球或谨慎局。".to_string()
+        }
+        ("TTG", pick, true)
+            if pick.contains('4')
+                || pick.contains('5')
+                || pick.contains('6')
+                || pick.contains("7+") =>
+        {
+            "高总进球降赔，市场对大开大合有所关注。".to_string()
+        }
+        ("CRS", "1:1", true) => "1:1 降赔，冷平/低比分剧本权重上升。".to_string(),
+        ("CRS", pick, true) if pick == "2:0" || pick == "3:0" => {
+            "强队零封胜比分降赔，市场支持强队控制局。".to_string()
+        }
+        ("CRS", "2:1", true) => "强队小胜但丢球剧本升温。".to_string(),
+        _ if label == "剧烈波动" => "赔率波动较大，需警惕盘口噪声或临场信息扰动。".to_string(),
+        _ => "赔率变化未形成明确单向信号，建议结合模型概率和快照数量复核。".to_string(),
+    }
+}
+
+fn odds_movement_details_for_sources(
+    conn: &Connection,
+    match_ids: &[String],
+) -> Vec<OddsMovementDetail> {
+    if match_ids.is_empty() {
+        return Vec::new();
+    }
+    let mut stmt = match conn.prepare(
+        "select market, pick, odds, created_at
+         from odds_snapshots
+         where match_id=?1
+         order by created_at asc, id asc",
+    ) {
+        Ok(stmt) => stmt,
+        Err(_) => return Vec::new(),
+    };
+    let mut grouped = BTreeMap::<(String, String), Vec<(String, f64)>>::new();
+    for match_id in match_ids {
+        if let Ok(rows) = stmt.query_map(params![match_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        }) {
+            for row in rows.filter_map(Result::ok) {
+                grouped
+                    .entry((row.0, row.1))
+                    .or_default()
+                    .push((row.3, row.2));
+            }
+        }
+    }
+    let mut details = Vec::new();
+    for ((market, pick), mut rows) in grouped {
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        let snapshot_count = rows.len();
+        let opening_odds = rows.first().map(|row| row.1).unwrap_or(0.0);
+        let latest_odds = rows.last().map(|row| row.1).unwrap_or(0.0);
+        let min_odds = rows.iter().map(|row| row.1).fold(f64::INFINITY, f64::min);
+        let max_odds = rows.iter().map(|row| row.1).fold(0.0, f64::max);
+        let first_seen_at = rows.first().map(|row| row.0.clone()).unwrap_or_default();
+        let latest_seen_at = rows.last().map(|row| row.0.clone()).unwrap_or_default();
+        let odds_change_abs = latest_odds - opening_odds;
+        let odds_change_pct = if opening_odds > 0.0 {
+            odds_change_abs / opening_odds
+        } else {
+            0.0
+        };
+        let (direction, change_label, volatility, trend_strength, is_latest_low, is_latest_high) =
+            classify_odds_movement(
+                opening_odds,
+                latest_odds,
+                min_odds,
+                max_odds,
+                snapshot_count,
+            );
+        let interpretation = odds_pick_interpretation(&market, &pick, &direction, &change_label);
+        details.push(OddsMovementDetail {
+            market,
+            pick,
+            opening_odds,
+            latest_odds,
+            min_odds: if min_odds.is_finite() { min_odds } else { 0.0 },
+            max_odds,
+            odds_change_abs,
+            odds_change_pct,
+            direction,
+            snapshot_count,
+            first_seen_at,
+            latest_seen_at,
+            volatility,
+            trend_strength,
+            is_latest_low,
+            is_latest_high,
+            change_label,
+            interpretation,
+        });
+    }
+    details
+}
+
+fn movement_detail_row(item: &OddsMovementDetail, include_line: bool) -> String {
+    if include_line {
+        format!(
+            "| {} | {} | {:.2} | {:.2} | {:.2} | {:.2} | {:+.2}% | {} | {} | {} |",
+            hhad_line_from_market(&item.market),
+            item.pick,
+            item.opening_odds,
+            item.latest_odds,
+            item.min_odds,
+            item.max_odds,
+            item.odds_change_pct * 100.0,
+            item.change_label,
+            item.snapshot_count,
+            item.interpretation
+        )
+    } else {
+        format!(
+            "| {} | {:.2} | {:.2} | {:.2} | {:.2} | {:+.2}% | {} | {} | {} |",
+            item.pick,
+            item.opening_odds,
+            item.latest_odds,
+            item.min_odds,
+            item.max_odds,
+            item.odds_change_pct * 100.0,
+            item.change_label,
+            item.snapshot_count,
+            item.interpretation
+        )
+    }
+}
+
+fn hhad_line_from_market(market: &str) -> String {
+    market
+        .split_whitespace()
+        .find(|part| part.starts_with('-') || part.starts_with('+'))
+        .unwrap_or("-")
+        .to_string()
+}
+
+fn market_movement_risk_tags(details: &[OddsMovementDetail], snapshot_batches: i64) -> Vec<String> {
+    let mut tags = Vec::new();
+    if snapshot_batches < 3 {
+        tags.push("insufficient_odds_snapshots".to_string());
+    }
+    for item in details {
+        let group = odds_market_group(&item.market);
+        if item.change_label == "剧烈波动" && group == "CRS" {
+            tags.push("score_market_volatile".to_string());
+        }
+        if item.direction == "降赔" {
+            match (group, item.pick.as_str()) {
+                ("HAD", "主胜") => tags.push("favorite_overheated".to_string()),
+                ("HAD", "平局") => tags.push("draw_risk_up".to_string()),
+                ("HAD", "客胜") => tags.push("upset_attention".to_string()),
+                ("HHAD", "让胜") => tags.push("handicap_cover_supported".to_string()),
+                ("HHAD", "让平") => tags.push("one_goal_win_supported".to_string()),
+                ("HHAD", "让负") => tags.push("handicap_cover_doubted".to_string()),
+                ("TTG", pick) if pick.contains('0') || pick.contains('1') || pick.contains('2') => {
+                    tags.push("under_goals_supported".to_string())
+                }
+                ("TTG", _) => tags.push("over_goals_supported".to_string()),
+                _ => {}
+            }
+        } else if item.direction == "升赔" {
+            match (group, item.pick.as_str()) {
+                ("HAD", "主胜") => tags.push("favorite_confidence_down".to_string()),
+                ("HHAD", "让胜") => tags.push("handicap_cover_doubted".to_string()),
+                _ => {}
+            }
+        }
+    }
+    tags.sort();
+    tags.dedup();
+    tags
+}
+
+fn movement_rows_for_group(
+    details: &[OddsMovementDetail],
+    group: &str,
+    picks: &[&str],
+    include_line: bool,
+) -> String {
+    let rows = picks
+        .iter()
+        .filter_map(|pick| {
+            details
+                .iter()
+                .find(|item| odds_market_group(&item.market) == group && item.pick == *pick)
+                .map(|item| movement_detail_row(item, include_line))
+        })
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        if include_line {
+            "| - | - | - | - | - | - | - | 快照不足 | 0 | 该选项赔率快照不足，不能判断真实变化。 |"
+                .to_string()
+        } else {
+            "| - | - | - | - | - | - | 快照不足 | 0 | 该选项赔率快照不足，不能判断真实变化。 |"
+                .to_string()
+        }
+    } else {
+        rows.join("\n")
+    }
+}
+
+fn key_market_summary(details: &[OddsMovementDetail]) -> String {
+    let mut ranked = details.to_vec();
+    ranked.sort_by(|a, b| {
+        b.trend_strength
+            .partial_cmp(&a.trend_strength)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let lines = ranked
+        .iter()
+        .take(8)
+        .map(|item| {
+            format!(
+                "* {} {}：{:.2} → {:.2}（绝对变化 {:+.2}，波动率 {:.2}%），{} {:+.2}%，{}；时间 {} → {}；最新位置：{}{}",
+                item.market,
+                item.pick,
+                item.opening_odds,
+                item.latest_odds,
+                item.odds_change_abs,
+                item.volatility * 100.0,
+                item.direction,
+                item.odds_change_pct * 100.0,
+                item.interpretation,
+                item.first_seen_at,
+                item.latest_seen_at,
+                if item.is_latest_low { "接近最低位" } else { "" },
+                if item.is_latest_high { "接近最高位" } else { "" }
+            )
+        })
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        "* 盘口快照不足，暂不能形成关键盘口摘要。".to_string()
+    } else {
+        lines.join("\n")
+    }
+}
+
+fn odds_movement_details_markdown(
+    conn: &Connection,
+    match_id: &str,
+    merged_source_ids: &[String],
+) -> (String, String, i64, String) {
+    let mut source_ids = vec![match_id.to_string()];
+    source_ids.extend(merged_source_ids.iter().cloned());
+    source_ids.sort();
+    source_ids.dedup();
+    let details = odds_movement_details_for_sources(conn, &source_ids);
+    let snapshot_batches = source_ids
+        .iter()
+        .map(|id| odds_snapshot_batches(conn, id))
+        .max()
+        .unwrap_or(0);
+    let risk_tags = market_movement_risk_tags(&details, snapshot_batches);
+    let quality = if details.is_empty() {
+        "缺失"
+    } else if snapshot_batches < 3 || details.iter().any(|item| item.snapshot_count < 2) {
+        "部分"
+    } else {
+        "完整"
+    };
+    let top_score_rows = {
+        let mut score_items = details
+            .iter()
+            .filter(|item| odds_market_group(&item.market) == "CRS")
+            .cloned()
+            .collect::<Vec<_>>();
+        score_items.sort_by(|a, b| {
+            b.trend_strength
+                .partial_cmp(&a.trend_strength)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let rows = score_items
+            .iter()
+            .take(10)
+            .map(|item| movement_detail_row(item, false))
+            .collect::<Vec<_>>();
+        if rows.is_empty() {
+            "| - | - | - | - | - | - | 快照不足 | 0 | 该选项赔率快照不足，不能判断真实变化。 |"
+                .to_string()
+        } else {
+            rows.join("\n")
+        }
+    };
+    let warning = if snapshot_batches < 3 {
+        "⚠ 赔率快照不足，盘口变化仅供参考。"
+    } else {
+        ""
+    };
+    let markdown = format!(
+        r#"## 盘口赔率变化明细
+
+{warning}
+
+### HAD 胜平负赔率变化
+
+| 选项 | 初始赔率 | 最新赔率 | 最低 | 最高 | 变化 | 趋势 | 快照数 | 解读 |
+| -- | ---: | ---: | -: | -: | -: | ------- | --: | -- |
+{had_rows}
+
+### HHAD 让球胜平负赔率变化
+
+| 盘口 | 选项 | 初始赔率 | 最新赔率 | 最低 | 最高 | 变化 | 趋势 | 快照数 | 解读 |
+| -- | -- | ---: | ---: | -: | -: | -: | -- | --: | -- |
+{hhad_rows}
+
+### TTG 总进球赔率变化
+
+| 总进球 | 初始赔率 | 最新赔率 | 最低 | 最高 | 变化 | 趋势 | 快照数 | 解读 |
+| --- | ---: | ---: | -: | -: | -: | -- | --: | -- |
+{ttg_rows}
+
+### 比分赔率变化 Top10
+
+| 比分 | 初始赔率 | 最新赔率 | 最低 | 最高 | 变化 | 趋势 | 快照数 | 解读 |
+| -- | ---: | ---: | -: | -: | -: | -- | --: | -- |
+{score_rows}
+
+### 关键盘口摘要
+
+{key_summary}
+
+### 盘口异动风险标签
+
+{risk_tags}
+
+### 快照覆盖情况
+
+* 盘口变化数据：{quality}
+* 盘口变化快照数：{snapshot_batches}
+* 数据来源 match_id：{source_ids}
+* 盘口变化主要风险：{risk_tag_text}
+
+### GPT 盘口解读重点
+
+请重点判断：
+1. 哪些赔率变化是真实支持，哪些可能是热门过热？
+2. 如果模型方向和赔率变化相反，是否应降级？
+3. 是否存在强队主胜热但让球不支持的情况？
+4. 是否存在平局/弱队方向降赔带来的冷门风险？
+5. 总进球赔率是否支持小球或大球？
+6. 比分赔率变化是否支持模型 Top 比分？
+7. 当前盘口变化是否与软件建议一致？
+"#,
+        warning = warning,
+        had_rows = movement_rows_for_group(&details, "HAD", &["主胜", "平局", "客胜"], false),
+        hhad_rows = movement_rows_for_group(&details, "HHAD", &["让胜", "让平", "让负"], true),
+        ttg_rows = movement_rows_for_group(
+            &details,
+            "TTG",
+            &["0球", "1球", "2球", "3球", "4球", "5球", "6球", "7+球"],
+            false
+        ),
+        score_rows = top_score_rows,
+        key_summary = key_market_summary(&details),
+        risk_tags = if risk_tags.is_empty() {
+            "-".to_string()
+        } else {
+            risk_tags.join("、")
+        },
+        quality = quality,
+        snapshot_batches = snapshot_batches,
+        source_ids = source_ids.join("、"),
+        risk_tag_text = if risk_tags.is_empty() {
+            "-".to_string()
+        } else {
+            risk_tags.join("、")
+        },
+    );
+    (
+        markdown,
+        quality.to_string(),
+        snapshot_batches,
+        if risk_tags.is_empty() {
+            "-".to_string()
+        } else {
+            risk_tags.join("、")
+        },
+    )
 }
 
 fn best_export_match_id_for<'a>(
@@ -10467,6 +10966,7 @@ fn build_gpt_analysis_package_markdown(
     include_simulation: bool,
     include_upset_lab: bool,
     include_raw_odds: bool,
+    include_odds_movement: bool,
     data_merge_note: &str,
     dedupe_status: &str,
     snapshot_selection_status: &str,
@@ -10518,6 +11018,27 @@ fn build_gpt_analysis_package_markdown(
                 .unwrap_or_else(|| "-".to_string())
         });
     let movement_summary = movement_summary_for_match(conn, match_id, 5);
+    let merged_source_ids = merged_sources_text
+        .split('、')
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "-")
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let (
+        odds_movement_markdown,
+        odds_movement_quality,
+        odds_movement_snapshot_count,
+        odds_movement_risks,
+    ) = if include_odds_movement {
+        odds_movement_details_markdown(conn, match_id, &merged_source_ids)
+    } else {
+        (
+            "本次导出未包含盘口赔率变化明细。".to_string(),
+            "未导出".to_string(),
+            0,
+            "-".to_string(),
+        )
+    };
     let has_raw_odds = snapshot_has_odds(snapshot);
     let odds_completeness_report =
         classify_odds_completeness(recommendations, analysis, has_raw_odds);
@@ -10731,6 +11252,9 @@ fn build_gpt_analysis_package_markdown(
 * 合并原因：{merge_reasons_text}
 * 赔率完整性：{odds_completeness}
 * 赔率缺失项：{odds_missing_items}
+* 盘口变化数据：{odds_movement_quality}
+* 盘口变化快照数：{odds_movement_snapshot_count}
+* 盘口变化主要风险：{odds_movement_risks}
 * 模型完整性：{model_completeness}
 * 模拟信息：{simulation_status}
 * 阶段字段：{stage_status}
@@ -10775,6 +11299,8 @@ fn build_gpt_analysis_package_markdown(
 * 快照不足提示：{snapshot_warning}
 * raw_odds_summary：{raw_odds_text}
 * 盘口/EV 摘要：{snapshot_ev}
+
+{odds_movement_markdown}
 
 ## 3. 模型输出
 * 模型版本：{model_version}
@@ -10934,6 +11460,10 @@ fn build_gpt_analysis_package_markdown(
         merge_reasons_text = merge_reasons_text,
         odds_completeness = odds_completeness_report.status_label,
         odds_missing_items = odds_missing_items,
+        odds_movement_quality = odds_movement_quality,
+        odds_movement_snapshot_count = odds_movement_snapshot_count,
+        odds_movement_risks = odds_movement_risks,
+        odds_movement_markdown = odds_movement_markdown,
         odds_quality_warning = odds_completeness_report.warning,
         model_completeness = if model_complete { "完整" } else { "缺失" },
         simulation_status = if has_simulation { "有" } else { "无" },
@@ -10969,6 +11499,7 @@ async fn build_gpt_analysis_package(
     include_simulation: bool,
     include_upset_lab: bool,
     include_raw_odds: bool,
+    include_odds_movement: bool,
 ) -> Result<Value, String> {
     let conn = open_conn(&app)?;
     let matches = list_matches(app.clone()).await.unwrap_or_default();
@@ -11051,6 +11582,7 @@ async fn build_gpt_analysis_package(
         include_simulation,
         include_upset_lab,
         include_raw_odds,
+        include_odds_movement,
         if merge_count > 1 {
             "本场匹配到多个来源，已优先选择有赔率/模型/模拟信息的快照。其他来源仅作为补充，不重复导出。"
         } else {
@@ -11093,6 +11625,7 @@ async fn build_gpt_analysis_package(
         "simulation_version": if cached_simulation.is_some() { "monte_carlo_v1" } else { "light_fallback_v1" },
         "data_quality": snapshot.map(|item| item.data_quality_score).unwrap_or_else(|| recs.first().map(|item| item.data_score).unwrap_or(0.0)),
         "odds_snapshot_count": odds_snapshot_count_for_match(&conn, &match_id),
+        "odds_movement_included": include_odds_movement,
         "warning": if snapshot.is_none() { "无赛前快照，已导出非冻结基础分析包。" } else { "" }
     }))
 }
@@ -11198,7 +11731,7 @@ fn gpt_today_overview_markdown(packages: &[Value]) -> String {
 
 #[tauri::command]
 async fn gpt_analysis_package(app: AppHandle, match_id: String) -> Result<Value, String> {
-    build_gpt_analysis_package(app, match_id, None, true, true, true).await
+    build_gpt_analysis_package(app, match_id, None, true, true, true, true).await
 }
 
 #[tauri::command]
@@ -11207,7 +11740,8 @@ async fn build_gpt_match_package_text(
     match_id: String,
     snapshot_id: Option<i64>,
 ) -> Result<String, String> {
-    let package = build_gpt_analysis_package(app, match_id, snapshot_id, true, true, true).await?;
+    let package =
+        build_gpt_analysis_package(app, match_id, snapshot_id, true, true, true, true).await?;
     Ok(package
         .get("markdown")
         .and_then(Value::as_str)
@@ -11247,7 +11781,7 @@ async fn gpt_today_analysis_packages(app: AppHandle) -> Result<Value, String> {
     let mut markdowns = Vec::new();
     for item in open_matches {
         let package =
-            build_gpt_analysis_package(app.clone(), item.id.clone(), None, true, true, true)
+            build_gpt_analysis_package(app.clone(), item.id.clone(), None, true, true, true, true)
                 .await?;
         if let Some(markdown) = package.get("markdown").and_then(Value::as_str) {
             markdowns.push(markdown.to_string());
@@ -11325,6 +11859,7 @@ async fn export_gpt_match_package(
         request.include_simulation.unwrap_or(true),
         request.include_upset_lab.unwrap_or(true),
         request.include_raw_odds.unwrap_or(true),
+        request.include_odds_movement.unwrap_or(true),
     )
     .await?;
     let markdown = package
@@ -11429,6 +11964,7 @@ async fn export_gpt_today_packages(
                     include_simulation: request.include_simulation,
                     include_upset_lab: request.include_upset_lab,
                     include_raw_odds: request.include_raw_odds,
+                    include_odds_movement: request.include_odds_movement,
                 },
             )
             .await?;
@@ -11455,6 +11991,7 @@ async fn export_gpt_today_packages(
                 request.include_simulation.unwrap_or(true),
                 request.include_upset_lab.unwrap_or(true),
                 request.include_raw_odds.unwrap_or(true),
+                request.include_odds_movement.unwrap_or(true),
             )
             .await?;
             if !package
@@ -11788,6 +12325,7 @@ async fn run_one_click_gpt_package_pipeline(
         include_simulation: Some(true),
         include_upset_lab: Some(true),
         include_raw_odds: Some(false),
+        include_odds_movement: Some(true),
         split_files: Some(false),
         auto_final_snapshot: Some(true),
     });
@@ -12247,6 +12785,7 @@ async fn run_one_click_gpt_package_pipeline(
                             include_simulation: request.include_simulation,
                             include_upset_lab: request.include_upset_lab,
                             include_raw_odds: request.include_raw_odds,
+                            include_odds_movement: request.include_odds_movement,
                             split_files: request.split_files,
                         },
                     )
@@ -18611,6 +19150,7 @@ mod tests {
             true,
             true,
             true,
+            true,
             "",
             "无需去重",
             "仅一个快照",
@@ -18721,6 +19261,7 @@ mod tests {
             &[],
             &[],
             &conn,
+            true,
             true,
             true,
             true,
@@ -18845,6 +19386,7 @@ mod tests {
             true,
             true,
             true,
+            true,
             "",
             "无需去重",
             "仅一个快照",
@@ -18861,6 +19403,107 @@ mod tests {
         assert!(markdown.contains("lineup unknown"));
         assert!(markdown.contains("⚠ 赔率仅部分完整，EV 和市场概率判断需谨慎。"));
         assert!(!markdown.contains("* 赔率完整性：完整"));
+    }
+
+    #[test]
+    fn odds_movement_classifier_labels_direction_and_volatility() {
+        assert_eq!(
+            classify_odds_movement(1.20, 1.16, 1.16, 1.20, 3).1,
+            "明显降赔"
+        );
+        assert_eq!(
+            classify_odds_movement(1.16, 1.20, 1.16, 1.20, 3).1,
+            "明显升赔"
+        );
+        assert_eq!(classify_odds_movement(2.00, 2.01, 2.00, 2.01, 3).1, "持平");
+        assert_eq!(
+            classify_odds_movement(2.00, 2.04, 1.80, 2.04, 4).1,
+            "剧烈波动"
+        );
+        assert_eq!(
+            classify_odds_movement(2.00, 1.90, 1.90, 2.00, 1).1,
+            "快照不足"
+        );
+    }
+
+    #[test]
+    fn gpt_odds_movement_markdown_uses_snapshots_and_merged_source_ids() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "create table odds_snapshots(
+                id integer primary key,
+                created_at text,
+                match_id text,
+                match_label text,
+                market text,
+                pick text,
+                odds real
+             );
+             insert into odds_snapshots values(1,'2026-07-01T10:00:00Z','2040352','英格兰 vs 刚果金','HAD 胜平负','主胜',1.40);
+             insert into odds_snapshots values(2,'2026-07-01T18:00:00Z','2040352','英格兰 vs 刚果金','HAD 胜平负','主胜',1.32);
+             insert into odds_snapshots values(3,'2026-07-01T10:00:00Z','2040352','英格兰 vs 刚果金','HAD 胜平负','平局',4.20);
+             insert into odds_snapshots values(4,'2026-07-01T18:00:00Z','2040352','英格兰 vs 刚果金','HAD 胜平负','平局',3.90);
+             insert into odds_snapshots values(5,'2026-07-01T10:00:00Z','2040352','英格兰 vs 刚果金','HHAD -1','让平',3.80);
+             insert into odds_snapshots values(6,'2026-07-01T18:00:00Z','2040352','英格兰 vs 刚果金','HHAD -1','让平',3.55);
+             insert into odds_snapshots values(7,'2026-07-01T10:00:00Z','2040352','英格兰 vs 刚果金','TTG 总进球','2球',3.30);
+             insert into odds_snapshots values(8,'2026-07-01T18:00:00Z','2040352','英格兰 vs 刚果金','TTG 总进球','2球',3.10);
+             insert into odds_snapshots values(9,'2026-07-01T10:00:00Z','football-data-org-537426','英格兰 vs 民主刚果','CRS 比分','1:1',7.50);
+             insert into odds_snapshots values(10,'2026-07-01T18:00:00Z','football-data-org-537426','英格兰 vs 民主刚果','CRS 比分','1:1',6.80);",
+        )
+        .unwrap();
+        let (markdown, quality, snapshot_count, risks) = odds_movement_details_markdown(
+            &conn,
+            "2040352",
+            &["football-data-org-537426".to_string()],
+        );
+        assert!(markdown.contains("## 盘口赔率变化明细"));
+        assert!(markdown.contains("### HAD 胜平负赔率变化"));
+        assert!(markdown.contains("### HHAD 让球胜平负赔率变化"));
+        assert!(markdown.contains("### TTG 总进球赔率变化"));
+        assert!(markdown.contains("### 比分赔率变化 Top10"));
+        assert!(markdown.contains("### 关键盘口摘要"));
+        assert!(markdown.contains("### GPT 盘口解读重点"));
+        assert!(markdown.contains("让平降赔，市场更支持强队小胜一球"));
+        assert!(markdown.contains("低/中总进球降赔"));
+        assert!(markdown.contains("1:1 降赔"));
+        assert!(markdown.contains("2040352、football-data-org-537426"));
+        assert_eq!(quality, "部分");
+        assert_eq!(snapshot_count, 2);
+        assert!(risks.contains("one_goal_win_supported"));
+        assert!(risks.contains("draw_risk_up"));
+    }
+
+    #[test]
+    fn gpt_markdown_can_exclude_odds_movement_section() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "create table odds_snapshots(id integer, match_id text, created_at text);
+             create table odds_movements(id integer, match_id text, market text, pick text, direction text, delta_pct real);",
+        )
+        .unwrap();
+        let match_row = test_match_row("2040352", "英格兰", "刚果金");
+        let analysis = test_analysis("2040352");
+        let markdown = build_gpt_analysis_package_markdown(
+            Some(&match_row),
+            Some(&analysis),
+            None,
+            &[],
+            &[],
+            &conn,
+            true,
+            true,
+            true,
+            false,
+            "",
+            "无需去重",
+            "仅一个快照",
+            1,
+            "2040352",
+            "2040352",
+            "综合评分最高",
+        );
+        assert!(!markdown.contains("## 盘口赔率变化明细"));
+        assert!(markdown.contains("本次导出未包含盘口赔率变化明细。"));
     }
 
     #[test]
@@ -18981,6 +19624,7 @@ mod tests {
             true,
             true,
             true,
+            true,
             "",
             "无需去重",
             "仅一个快照",
@@ -19046,6 +19690,7 @@ mod tests {
             true,
             true,
             true,
+            true,
             "",
             "无需去重",
             "仅一个快照",
@@ -19076,6 +19721,7 @@ mod tests {
             &[],
             &[],
             &conn,
+            true,
             true,
             true,
             true,
@@ -19124,6 +19770,7 @@ mod tests {
             true,
             true,
             true,
+            true,
             "",
             "无需去重",
             "仅一个快照",
@@ -19166,6 +19813,7 @@ mod tests {
             &[rec],
             &[],
             &conn,
+            true,
             true,
             true,
             true,

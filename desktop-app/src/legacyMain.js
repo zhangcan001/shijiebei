@@ -96,12 +96,17 @@ async function copyTodayGptAnalysisPackages() {
   state.probeResult = { ok: true, message: packageResult.message || "今日 GPT 分析包已复制。", count: packageResult.count || 0 };
 }
 
+function includeOddsMovementForGptPackage() {
+  return document.querySelector("#gpt-include-odds-movement")?.checked ?? true;
+}
+
 async function exportTodayGptAnalysisPackages() {
   state.probeResult = await api.invokeCommand("export_gpt_today_packages", {
     request: {
       includeSimulation: true,
       includeUpsetLab: true,
       includeRawOdds: true,
+      includeOddsMovement: includeOddsMovementForGptPackage(),
       splitFiles: false
     }
   });
@@ -114,7 +119,8 @@ async function exportGptMatchPackage(matchId, snapshotId = null) {
       snapshotId: snapshotId ? Number(snapshotId) : null,
       includeSimulation: true,
       includeUpsetLab: true,
-      includeRawOdds: true
+      includeRawOdds: true,
+      includeOddsMovement: includeOddsMovementForGptPackage()
     }
   });
 }
@@ -197,6 +203,7 @@ async function runOneClickGptPackagePipeline() {
         includeSimulation: true,
         includeUpsetLab: true,
         includeRawOdds: false,
+        includeOddsMovement: includeOddsMovementForGptPackage(),
         splitFiles: false,
         autoFinalSnapshot: true
       }
@@ -1743,6 +1750,7 @@ function manualAnalysisPanelHtml() {
         <button class="btn secondary" data-action="copy-today-gpt-packages">批量复制今日 GPT 分析包</button>
         <button class="btn secondary" data-action="export-gpt-today-packages">一键导出今日全部GPT分析包</button>
         <button class="btn secondary" data-action="open-gpt-exports-dir">打开GPT包目录</button>
+        <label class="muted"><input id="gpt-include-odds-movement" type="checkbox" checked> 包含盘口赔率变化</label>
         <span class="muted">当前记录对象：${label}</span>
       </div>
       <div class="plan-grid">
